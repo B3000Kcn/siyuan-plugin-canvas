@@ -284,6 +284,80 @@
     }
   }
 
+  // --- Siyuan API Call Wrappers ---
+  async function executeDeleteBlock(blockId: string): Promise<void> {
+      console.log(`Attempting to delete block: ${blockId}`);
+      try {
+          const response = await fetch('/api/block/deleteBlock', {
+              method: 'POST',
+              headers: {
+                  'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ id: blockId }),
+          });
+          if (!response.ok) {
+              const errorText = await response.text();
+              throw new Error(`API deleteBlock failed (${response.status}): ${errorText}`);
+          }
+          const result = await response.json();
+          if (result.code !== 0) {
+              throw new Error(`API deleteBlock returned error code ${result.code}: ${result.msg}`);
+          }
+          console.log(`Block ${blockId} deleted successfully.`);
+          // Optionally add a success message to chat?
+          // addSystemMessage(`已成功删除块 ${blockId}`);
+      } catch (error) {
+          console.error(`Error executing deleteBlock for ${blockId}:`, error);
+          errorMessage = `删除块 ${blockId} 失败: ${error.message}`;
+          throw error; // Re-throw to be caught by sendMessage
+      }
+  }
+
+  async function executeUpdateBlock(blockId: string, newMarkdown: string): Promise<void> {
+      console.log(`Attempting to update block ${blockId} with new markdown:`, newMarkdown);
+      try {
+          const response = await fetch('/api/block/updateBlock', {
+              method: 'POST',
+              headers: {
+                  'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                  id: blockId,
+                  dataType: 'markdown', // Assuming markdown is the desired data type
+                  data: newMarkdown,
+              }),
+          });
+          if (!response.ok) {
+              const errorText = await response.text();
+              throw new Error(`API updateBlock failed (${response.status}): ${errorText}`);
+          }
+          const result = await response.json();
+          if (result.code !== 0) {
+              throw new Error(`API updateBlock returned error code ${result.code}: ${result.msg}`);
+          }
+          console.log(`Block ${blockId} updated successfully.`);
+          // Optionally add a success message to chat?
+          // addSystemMessage(`已成功更新块 ${blockId}`);
+      } catch (error) {
+          console.error(`Error executing updateBlock for ${blockId}:`, error);
+          errorMessage = `更新块 ${blockId} 失败: ${error.message}`;
+          throw error; // Re-throw to be caught by sendMessage
+      }
+  }
+
+  // --- Utility function to add system messages (optional) ---
+  // function addSystemMessage(text: string) {
+  //     const sysId = Date.now().toString() + 'sys';
+  //     const sysMessage: DisplayChatMessage = { 
+  //         id: sysId, 
+  //         role: 'system', // Or maybe a different role for clarity?
+  //         content: text, 
+  //         html: markdownToHtml(`*${text}*`) // Example formatting
+  //     }; 
+  //     messages.update(currentMessages => [...currentMessages, sysMessage]);
+  //     messages.set([...get(messages)]);
+  // }
+
   // --- Message Sending Function ---
   async function sendMessage() {
     if (!userInput.trim() || isLoading) return; // Prevent sending empty or during loading
@@ -358,7 +432,8 @@
         }));
 
     // Modify system prompt to include context if available
-    let systemPrompt = "You are a helpful AI assistant integrated into Siyuan Note.";
+    let systemPrompt = `You are a helpful AI assistant integrated into Siyuan Note.\nYou can interact with the document content. \nWhen you need to modify the document based on the user's request, output **only** a JSON command block with the required action. \nUse the block IDs provided in the context.\n\nAvailable actions:\n1. To delete a block: \`\`\`json {"action": "delete", "block_id": "BLOCK_ID_TO_DELETE"} \`\`\`\n2. To update a block's content: \`\`\`json {"action": "update", "block_id": "BLOCK_ID_TO_UPDATE", "new_markdown": "NEW_MARKDOWN_CONTENT"} \`\`\`\n\nIf you are just answering a question or providing information, respond normally without the JSON block.`;
+
     if (combinedContextForApi) { // Check the combined context
         // Use the new structured context string
         // Context string already contains appropriate header (Referenced or Structured)
@@ -376,6 +451,40 @@
         // Pass settings to fetchChatCompletion
         const assistantResponseContent = await fetchChatCompletion(finalMessagesForApi, currentSettings);
         
+        // --- Check for Action Command --- 
+        let commandExecuted = false;
+        const commandMatch = assistantResponseContent.match(/```json\n({.*?})\n```/s);
+        
+        if (commandMatch && commandMatch[1]) {
+            try {
+                const command = JSON.parse(commandMatch[1]);
+                console.log("Parsed AI command:", command);
+                if (command.action === 'delete' && command.block_id) {
+                    await executeDeleteBlock(command.block_id);
+                    commandExecuted = true;
+                    // Add confirmation message instead of assistant's raw JSON
+                    const confirmId = Date.now().toString() + 'cmd-del';
+                    messages.update(m => [...m, { id: confirmId, role: 'assistant', content: `已执行删除块 ${command.block_id} 的操作。`, html: markdownToHtml(`已执行删除块 **${command.block_id}** 的操作。`) }]);
+                    messages.set([...get(messages)]);
+                } else if (command.action === 'update' && command.block_id && typeof command.new_markdown === 'string') {
+                    await executeUpdateBlock(command.block_id, command.new_markdown);
+                    commandExecuted = true;
+                    // Add confirmation message
+                    const confirmId = Date.now().toString() + 'cmd-upd';
+                    messages.update(m => [...m, { id: confirmId, role: 'assistant', content: `已执行更新块 ${command.block_id} 的操作。`, html: markdownToHtml(`已执行更新块 **${command.block_id}** 的操作。`) }]);
+                    messages.set([...get(messages)]);
+                } else {
+                    console.warn("Parsed command JSON has invalid action or missing parameters:", command);
+                    // Fall through to display the raw response if command is invalid
+                }
+            } catch (parseError) {
+                console.error("Failed to parse command JSON:", parseError, "Raw content:", commandMatch[1]);
+                // Fall through to display the raw response if parsing fails
+            }
+        }
+        
+        // --- Display Normal Assistant Response (if no command executed) ---
+        if (!commandExecuted) {
         const assistantId = Date.now().toString() + Math.random().toString(36).substring(2, 9);
         // Create assistant message with unique ID
         const assistantMessage: DisplayChatMessage = { 
@@ -387,6 +496,7 @@
         messages.update(currentMessages => [...currentMessages, assistantMessage]);
         messages.set([...get(messages)]); // Force reactivity update
         console.log("Assistant message added to store:", get(messages)); // Log after update
+        }
 
         // saveMessagesToStorage(); // Assuming this uses role/content
 
