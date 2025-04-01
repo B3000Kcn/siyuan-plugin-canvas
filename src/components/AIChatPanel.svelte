@@ -103,9 +103,13 @@
       }
       const initialText = '新对话已开始，有什么可以帮您？';
       const initialHtml = markdownToHtml(initialText); 
-      messages.update(currentMessages => [...currentMessages, { role: 'assistant', content: initialText, html: initialHtml }]);
+      messages.set([{
+          id: Date.now().toString() + 'init-new', // Use a new unique ID
+          role: 'assistant', 
+          content: initialText, 
+          html: initialHtml 
+      }]);
       currentConversationId = null;
-      nextId = 1;
       userInput = '';
       await tick(); 
       scrollToBottom(); 
