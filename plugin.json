@@ -1,8 +1,8 @@
 {
   "name": "siyuan-plugin-canvas",
   "author": "B3000Kcn",
-  "url": "https://github.com/b3000kcn/siyuan-plugin-canvas", 
-  "version": "0.1.0",
+  "url": "https://github.com/B3000Kcn/siyuan-plugin-canvas", 
+  "version": "0.1.1",
   "displayName": {
     "zh_CN": "智能画布",
     "en_US": "Smart Canvas"
