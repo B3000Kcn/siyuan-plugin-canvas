@@ -1,278 +1,75 @@
+# 智能画布 - 思源笔记插件
 
-# SiYuan plugin sample with vite and svelte
+将类似 Cursor 和 GPT Canvas 的交互式 AI 助手体验带入您的思源笔记工作空间。与 AI 对话，提供笔记上下文，让 AI 帮助您更智能地编写和处理文档。
 
-[中文版](./README_zh_CN.md)
+## 主要功能
 
-> Consistent with [siyuan/plugin-sample](https://github.com/siyuan-note/plugin-sample) [v0.3.5](https://github.com/siyuan-note/plugin-sample/tree/v0.3.5)
+*   **集成聊天界面：** 在思源笔记中提供一个专门的面板，用于和 AI 进行交互。
+*   **上下文感知：**
+    *   自动识别当前活动文档。
+    *   允许引用特定的块或整个文档作为 AI 的上下文。
+*   **上下文引用：**
+    *   **块选区引用：** 在编辑器中选中块内文本，点击聊天面板的"引用选区"按钮，将包含选中文本的块添加为上下文引用（例如标签"选区 1"）。此引用仅对当前发送的消息有效。
+    *   **文档引用：** 点击引用栏上的"@"按钮，将当前打开的文档添加为持久化的上下文引用。
+    *   **引用栏：** 清晰地显示当前激活的上下文引用标签，并允许移除它们。
+*   **AI 交互：**
+    *   与可配置的 AI 模型（如 DeepSeek、GPT 等）进行对话。
+    *   AI 会使用您提供的文档和块引用作为上下文来生成回复。
+    *   (未来功能) 根据 AI 的建议执行插入、删除、修改笔记内容等命令。
+*   **对话管理：**
+    *   自动保存对话。
+    *   从历史记录列表中加载之前的对话。
+    *   可以删除不需要的对话记录。
+*   **插件设置：** 配置您的 AI 服务 API Key，并选择要使用的 AI 模型。
 
+## 如何使用
 
+### 安装
 
-1. Using vite for packaging
-2. Use symbolic linking instead of putting the project into the plugins directory program development
-3. Built-in support for the svelte framework
+1.  从最新的 [GitHub Release](https://github.com/YOUR_GITHUB_USERNAME/siyuan-plugin-canvas/releases) 下载 `package.zip` 文件 (请替换为您的实际链接)。
+2.  在思源笔记中，打开 `设置` -> `集市` -> `手动安装插件`。
+3.  选择下载的 `package.zip` 文件。
+4.  在 `已下载` 标签页中启用"智能画布"插件。
 
-     > **If don't want svelte, turn to this template**: [frostime/plugin-sample-vite](https://github.com/frostime/plugin-sample-vite)
-     >
-     > **We also provide with a vite+solidjs template**: [frostime/plugin-sample-vite-solidjs](https://github.com/frostime/plugin-sample-vite-solidjs)
+### 设置
 
-4. Provides a github action template to automatically generate package.zip and upload to new release
+1.  启用插件后，应该会出现一个新的图标（或者通过插件设置/面板访问）。
+2.  打开插件面板。
+3.  进入插件设置（通常在思源主菜单 `设置` -> `插件` 下找到）。
+4.  输入您的 AI 服务 API Key，选择您想使用的 AI 模型，并保存设置。
 
+### 基本用法
 
-> [!TIP]
-> You can also use our maintained [siyuan-plugin-cli](https://www.npmjs.com/package/siyuan-plugin-cli) command-line tool to directly build plugins in your local terminal.
->
-> Additionally, for the `make-link` related commands mentioned in this plugin, all future updates will be made in [siyuan-plugin-cli](https://www.npmjs.com/package/siyuan-plugin-cli).
->
-> The built-in `make-link` scripts may also be removed in a future version, in favor of using the `siyuan-plugin-cli` tool, aiming to simplify the workload of maintaining multiple plugin templates.
+1.  **打开面板：** 访问智能画布聊天面板。
+2.  **提供上下文 (可选)：**
+    *   **引用块：** 在笔记编辑器中选中一个或多个块内的文本，然后点击聊天面板中的"引用选区"按钮。引用栏中会出现类似"选区 1"的标签。
+    *   **引用文档：** 浏览文档时，点击引用栏上的"@"按钮，将整个文档添加为上下文。引用栏中会出现带有文档名称的标签。
+    *   **移除引用：** 点击引用标签上的"×"即可移除该引用。
+3.  **聊天：** 在输入框中输入您的问题或指令，按回车或点击"发送"按钮。AI 将结合当前激活的引用上下文进行回复。
+4.  **管理历史：** 使用"📜 加载历史对话"按钮查看、加载或删除过去的对话。
+5.  **新对话：** 点击"➕ 新对话"按钮开始一个全新的对话。
 
+**## 注意事项**
 
-## Get started
+*   **关于"引用选区"：** 当您选中编辑器中的文本（即使跨越多个块）并点击"引用选区"时，插件会将**包含这些选中文本的所有块的完整内容**作为上下文提供给 AI，而不是仅仅提供您选中的那部分文字。AI 会知道这些块都属于同一个引用标签（如"选区 1"）。
+*   **多块引用的限制：** 当一个引用标签（如"选区 1"）关联了多个块时：
+    *   AI 可以**读取并理解**所有关联块的内容，并综合这些信息来回答您的问题。
+    *   但请注意，AI **无法同时对多个块执行操作**（如修改或插入）。如果您需要 AI 执行具体操作，请确保每次只引用单个块，或在指令中明确指定要操作的特定块。
 
-1. Use the <kbd>Use this template</kbd> button to make a copy of this repo as a template. Note that the repository name should match the plugin name, and the default branch must be `main`.
-2. Clone your repository to the local development folder.
-    * Note: Unlike `plugin-sample`, this example does not recommend directly downloading the code to `{workspace}/data/plugins/`.
-3. Install [NodeJS](https://nodejs.org/en/download) and [pnpm](https://pnpm.io/installation), then run `pnpm i` in the development folder to install the required dependencies.
-4. Run the `pnpm run make-link` command to create a symbolic link (Windows developers, please refer to the "make-link on Windows" section below).
-5. Execute `pnpm run dev` for real-time compilation.
-6. Open the marketplace in SiYuan and enable the plugin in the download tab.
+## 开发说明
 
-### Setting the Target Directory for the make-link Command
+本插件使用 Vite 和 Svelte 构建。
 
-The `make-link` command creates a symbolic link that binds your `dev` directory to the SiYuan plugin directory. You can configure the target SiYuan workspace and create the symbolic link in three ways:
+1.  克隆本仓库。
+2.  安装依赖：`pnpm install`
+3.  运行开发服务器：`pnpm run dev` (需要先使用 `pnpm run make-link` 或 `pnpm run make-link-win` 创建开发链接)。
+4.  构建生产版本：`pnpm run build`
 
-1. **Select Workspace**
-    - Open SiYuan, ensure the SiYuan kernel is running.
-    - Run `pnpm run make-link`, the script will automatically detect all SiYuan workspaces, please manually enter the number to select the workspace.
-        ```bash
-        >>> pnpm run make-link
-        > plugin-sample-vite-svelte@0.0.3 make-link H:\SrcCode\开源项目\plugin-sample-vite-svelte
-        > node  --no-warnings ./scripts/make_dev_link.js
+## 许可证
 
-        "targetDir" is empty, try to get SiYuan directory automatically....
-        Got 2 SiYuan workspaces
-        [0] H:\Media\SiYuan
-        [1] H:\临时文件夹\SiYuanDevSpace
-        Please select a workspace[0-1]: 0
-        Got target directory: H:\Media\SiYuan/data/plugins
-        Done! Created symlink H:\Media\SiYuan/data/plugins/plugin-sample-vite-svelte
-        ```
-2. **Manually Configure Target Directory**
-    - Open the `./scripts/make_dev_link.js` file, change `targetDir` to the SiYuan plugin directory `<siyuan workspace>/data/plugins`.
-    - Run the `pnpm run make-link` command. If you see a message similar to the one below, it indicates successful creation:
+本插件使用 Apache License 2.0 许可证。
 
-3. **Set Environment Variable to Create Symbolic Link**
-    - Set the system environment variable `SIYUAN_PLUGIN_DIR` to the path `workspace/data/plugins`.
+## 作者
 
-### make-link on Windows
-
-Due to SiYuan upgrading to Go 1.23, the old version of junction links cannot be recognized normally on Windows, so it has been changed to create `dir` symbolic links.
-
-> https://github.com/siyuan-note/siyuan/issues/12399
-
-However, creating directory symbolic links on Windows using NodeJs may require administrator privileges. You have the following options:
-
-1. Run `pnpm run make-link` in a command line with administrator privileges.
-2. Configure Windows settings, enable developer mode in [System Settings - Update & Security - Developer Mode] then run `pnpm run make-link`.
-3. Run `pnpm run make-link-win`, this command will use a PowerShell script to request administrator privileges, requiring the system to enable PowerShell script execution permissions.
-
-## I18n
-
-In terms of internationalization, our main consideration is to support multiple languages. Specifically, we need to
-complete the following tasks:
-
-* Meta information about the plugin itself, such as plugin description and readme
-    * `description` and `readme` fields in plugin.json, and the corresponding README*.md file
-* Text used in the plugin, such as button text and tooltips
-    * public/i18n/*.json language configuration files
-    * Use `this.i18.key` to get the text in the code
-* YAML Support
-  * This template specifically supports I18n based on YAML syntax, see `public/i18n/zh_CN.yaml`
-  * During compilation, the defined YAML files will be automatically translated into JSON files and placed in the dist or dev directory.
-
-It is recommended that the plugin supports at least English and Simplified Chinese, so that more people can use it more
-conveniently.
-
-## plugin.json
-
-```json
-{
-  "name": "plugin-sample-vite-svelte",
-  "author": "frostime",
-  "url": "https://github.com/siyuan-note/plugin-sample-vite-svelte",
-  "version": "0.1.3",
-  "minAppVersion": "2.8.8",
-  "backends": ["windows", "linux", "darwin"],
-  "frontends": ["desktop"],
-  "displayName": {
-    "en_US": "Plugin sample with vite and svelte",
-    "zh_CN": "插件样例 vite + svelte 版"
-  },
-  "description": {
-    "en_US": "SiYuan plugin sample with vite and svelte",
-    "zh_CN": "使用 vite 和 svelte 开发的思源插件样例"
-  },
-  "readme": {
-    "en_US": "README_en_US.md",
-    "zh_CN": "README.md"
-  },
-  "funding": {
-    "openCollective": "",
-    "patreon": "",
-    "github": "",
-    "custom": [
-      "https://ld246.com/sponsor"
-    ]
-  },
-  "keywords": [
-    "sample", "示例"
-  ]
-}
-```
-
-* `name`: Plugin name, must be the same as the repo name, and must be unique globally (no duplicate plugin names in the
-  marketplace)
-* `author`: Plugin author name
-* `url`: Plugin repo URL
-* `version`: Plugin version number, it is recommended to follow the [semver](https://semver.org/) specification
-* `minAppVersion`: Minimum version number of SiYuan required to use this plugin
-* `backends`: Backend environment required by the plugin, optional values are `windows`, `linux`, `darwin`, `docker`, `android`, `ios` and `all`
-  * `windows`: Windows desktop
-  * `linux`: Linux desktop
-  * `darwin`: macOS desktop
-  * `docker`: Docker
-  * `android`: Android APP
-  * `ios`: iOS APP
-  * `all`: All environments
-* `frontends`: Frontend environment required by the plugin, optional values are `desktop`, `desktop-window`, `mobile`, `browser-desktop`, `browser-mobile` and `all`
-  * `desktop`: Desktop
-  * `desktop-window`: Desktop window converted from tab
-  * `mobile`: Mobile APP
-  * `browser-desktop`: Desktop browser
-  * `browser-mobile`: Mobile browser
-  * `all`: All environments
-* `displayName`: Template display name, mainly used for display in the marketplace list, supports multiple languages
-    * `default`: Default language, must exist
-    * `zh_CN`, `en_US` and other languages: optional, it is recommended to provide at least Chinese and English
-* `description`: Plugin description, mainly used for display in the marketplace list, supports multiple languages
-    * `default`: Default language, must exist
-    * `zh_CN`, `en_US` and other languages: optional, it is recommended to provide at least Chinese and English
-* `readme`: readme file name, mainly used to display in the marketplace details page, supports multiple languages
-    * `default`: Default language, must exist
-    * `zh_CN`, `en_US` and other languages: optional, it is recommended to provide at least Chinese and English
-* `funding`: Plugin sponsorship information
-    * `openCollective`: Open Collective name
-    * `patreon`: Patreon name
-    * `github`: GitHub login name
-    * `custom`: Custom sponsorship link list
-* `keywords`: Search keyword list, used for marketplace search function
-
-## Package
-
-No matter which method is used to compile and package, we finally need to generate a package.zip, which contains at
-least the following files:
-
-* i18n/*
-* icon.png (160*160)
-* index.css
-* index.js
-* plugin.json
-* preview.png (1024*768)
-* README*.md
-
-## List on the marketplace
-
-* `pnpm run build` to generate package.zip
-* Create a new GitHub release using your new version number as the "Tag version". See here for an
-  example: https://github.com/siyuan-note/plugin-sample/releases
-* Upload the file package.zip as binary attachments
-* Publish the release
-
-If it is the first release, please create a pull request to
-the [Community Bazaar](https://github.com/siyuan-note/bazaar) repository and modify the plugins.json file in it. This
-file is the index of all community plugin repositories, the format is:
-
-```json
-{
-  "repos": [
-    "username/reponame"
-  ]
-}
-```
-
-After the PR is merged, the bazaar will automatically update the index and deploy through GitHub Actions. When releasing
-a new version of the plugin in the future, you only need to follow the above steps to create a new release, and you
-don't need to PR the community bazaar repo.
-
-Under normal circumstances, the community bazaar repo will automatically update the index and deploy every hour,
-and you can check the deployment status at https://github.com/siyuan-note/bazaar/actions.
-
-## Use Github Action
-
-The github action is included in this sample, you can use it to publish your new realse to marketplace automatically:
-
-1. In your repo setting page `https://github.com/OWNER/REPO/settings/actions`, down to **Workflow Permissions** and open the configuration like this:
-
-    ![](asset/action.png)
-
-2. Push a tag in the format `v*` and github will automatically create a new release with new bulit package.zip
-
-3. By default, it will only publish a pre-release, if you don't think this is necessary, change the settings in release.yml
-
-    ```yaml
-    - name: Release
-        uses: ncipollo/release-action@v1
-        with.
-            allowUpdates: true
-            artifactErrorsFailBuild: true
-            artifacts: 'package.zip'
-            token: ${{ secrets.GITHUB_TOKEN }}
-            prerelease: true # change this to false
-    ```
-
-
-## How to remove svelte dependencies
-
-> Pure vite without svelte: https://github.com/frostime/plugin-sample-vite
-
-This plugin is packaged in vite and provides a dependency on the svelte framework. However, in practice some developers may not want to use svelte and only want to use the vite package.
-
-In fact you can use this template without using svelte without any modifications at all. The compilation-related parts of the svelte compilation are loaded into the vite workflow as plugins, so even if you don't have svelte in your project, it won't matter much.
-
-If you insist on removing all svelte dependencies so that they do not pollute your workspace, you can perform the following steps. 1.
-
-1. delete the
-    ```json
-    {
-      "@sveltejs/vite-plugin-svelte": "^2.0.3",
-      "@tsconfig/svelte": "^4.0.1",
-      "svelte": "^3.57.0"
-    }
-    ```
-2. delete the `svelte.config.js` file
-3. delete the following line from the `vite.config.js` file
-    - Line 6: `import { svelte } from "@sveltejs/vite-plugin-svelte"`
-    - Line 20: `svelte(),`
-4. delete line 37 of `tsconfig.json` from `"svelte"` 5.
-5. re-run `pnpm i`
-
-## Developer's Guide
-
-Developers of SiYuan need to pay attention to the following specifications.
-
-### 1. File Reading and Writing Specifications
-
-If plugins or external extensions require direct reading or writing of files under the `data` directory, please use the kernel API to achieve this. **Do not call `fs` or other electron or nodejs APIs directly**, as it may result in data loss during synchronization and cause damage to cloud data.
-
-Related APIs can be found at: `/api/file/*` (e.g., `/api/file/getFile`).
-
-### 2. Daily Note Attribute Specifications
-
-When creating a daily note in SiYuan, a custom-dailynote-yyyymmdd attribute will be automatically added to the document to distinguish it from regular documents.
-
-> For more details, please refer to [Github Issue #9807](https://github.com/siyuan-note/siyuan/issues/9807).
-
-Developers should pay attention to the following when developing the functionality to manually create Daily Notes:
-
-* If `/api/filetree/createDailyNote` is called to create a daily note, the attribute will be automatically added to the document, and developers do not need to handle it separately
-* If a document is created manually by developer's code (e.g., using the `createDocWithMd` API to create a daily note), please manually add this attribute to the document
+B3000Kcn
 
