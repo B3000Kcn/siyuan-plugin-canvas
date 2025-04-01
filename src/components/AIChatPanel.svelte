@@ -45,6 +45,7 @@
   let selectedBlockIds: string[] = []; // Store IDs of currently selected blocks in editor
   let canAddReference = false; // Control the state of the Add Reference button
   let debounceTimeout: number | null = null; // <-- Add debounce timer variable
+  let showHistory = false; // Control visibility of history list
 
   // 订阅 store
   const settingsUnsubscribe = settingsStore.subscribe(value => {
@@ -415,6 +416,67 @@
   //     messages.set([...get(messages)]);
   // }
 
+  // --- Function to get Markdown content for a referenced document ID ---
+  async function getReferencedDocumentContent(docId: string): Promise<string | null> {
+    console.log(`[Context Fetch] Attempting to get Markdown for referenced document ID: ${docId}`);
+    
+    // --- Attempt 1: Use /api/block/getBlockMarkdown --- 
+    try {
+        console.log(`[Context Fetch] Trying /api/block/getBlockMarkdown for ${docId}...`);
+        const response = await fetch('/api/block/getBlockMarkdown', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ id: docId }),
+        });
+
+        if (response.ok) {
+            const result = await response.json();
+            if (result.code === 0 && result.data?.markdown) {
+                console.log(`[Context Fetch] Success via /api/block/getBlockMarkdown for doc ID ${docId}. Length: ${result.data.markdown.length}`);
+                return result.data.markdown; // Return if successful
+            } else {
+                 console.warn(`[Context Fetch] /api/block/getBlockMarkdown returned success code but no markdown data for doc ID ${docId}. Result:`, result);
+            }
+        } else {
+             console.warn(`[Context Fetch] /api/block/getBlockMarkdown failed (${response.status}) for doc ID ${docId}.`);
+        }
+    } catch (error) {
+        console.error(`[Context Fetch] Error calling /api/block/getBlockMarkdown for ${docId}:`, error);
+    }
+
+    // --- Attempt 2 (Fallback): Use /api/export/exportMdContent --- 
+    console.log(`[Context Fetch] Fallback: Trying /api/export/exportMdContent for ${docId}...`);
+    try {
+        const exportResponse = await fetch('/api/export/exportMdContent', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ id: docId }),
+        });
+
+        if (!exportResponse.ok) {
+             const errorText = await exportResponse.text();
+            throw new Error(`Fallback API /api/export/exportMdContent failed (${exportResponse.status}): ${errorText}`);
+        }
+        
+        const exportResult = await exportResponse.json();
+        
+        if (exportResult.code === 0 && exportResult.data?.content) {
+            console.log(`[Context Fetch] Success via FALLBACK /api/export/exportMdContent for doc ID ${docId}. Length: ${exportResult.data.content.length}`);
+            return exportResult.data.content; // Return content from export
+        } else {
+            throw new Error(`Fallback API /api/export/exportMdContent returned error code ${exportResult.code} or no content: ${exportResult.msg || 'No content found'}`);
+        }
+
+    } catch (error) {
+        console.error(`[Context Fetch] Error calling FALLBACK /api/export/exportMdContent for ${docId}:`, error);
+        return null; // Both attempts failed
+    }
+  }
+
   // --- Message Sending Function ---
   async function sendMessage() {
     const currentUserInput = userInput.trim();
@@ -505,55 +567,46 @@
     await tick();
     scrollToBottom();
 
-    // --- Context Fetching --- 
-    let mainDocumentContext = '';
-    let referencedContext = '';
+    // --- 2. Prepare Context --- 
+    let documentContext = await getStructuredDocumentContext(currentDocId);
+    let referencedBlocksContext = ''; // Content from explicit block selections
+    let referencedDocumentsContext = ''; // Content from @ referenced documents
     const currentReferences = get(referenceStore);
+
     const selectionReferences = currentReferences.filter(ref => ref.type === 'selection');
-
-    // 1. Always fetch main document context if currentDocId exists
-    if (currentDocId) {
-        console.log("Fetching structured context for document ID:", currentDocId);
-        try {
-            mainDocumentContext = await getStructuredDocumentContext(currentDocId);
-            console.log("Fetched main document context length:", mainDocumentContext?.length ?? 0);
-        } catch (err) {
-            console.error("Error fetching structured document context:", err);
-            errorMessage = `获取文档结构上下文失败: ${err.message}`;
-        }
-    } else {
-        console.log("No currentDocId, skipping main document context fetch.");
-    }
-
-    // 2. Fetch referenced context if references exist
     if (selectionReferences.length > 0) {
-        const referencedBlockIds = Array.from(new Set(selectionReferences.flatMap(ref => ref.blockIds)));
-        console.log("[sendMessage] Found selection references, preparing to fetch context for IDs:", referencedBlockIds); // Log IDs being used
-        try {
-            referencedContext = await getReferencedBlocksContext(referencedBlockIds);
-            console.log("[sendMessage] Fetched referenced context length:", referencedContext?.length ?? 0);
-        } catch (err) {
-            console.error("[sendMessage] Error fetching referenced block context:", err);
-            errorMessage = `获取引用块上下文失败: ${err.message}`;
+      const referencedBlockIds = selectionReferences.flatMap(ref => ref.blockIds);
+      referencedBlocksContext = await getReferencedBlocksContext(referencedBlockIds);
+    }
+    
+    const documentReferences = currentReferences.filter(ref => ref.type === 'document');
+    if (documentReferences.length > 0) {
+        let tempDocContext = '\n\n--- Referenced Documents ---\n';
+        for (const ref of documentReferences) {
+            const docId = ref.blockIds[0]; // Assuming one ID per document ref
+            const docContent = await getReferencedDocumentContent(docId);
+            if (docContent) {
+                // Use the label (title) stored in the reference
+                tempDocContext += `\n--- Document: ${ref.label} (ID: ${docId}) ---\n${docContent}\n---\;\n`;
+            } else {
+                // If content fetch failed, at least mention the reference
+                tempDocContext += `\n--- Document: ${ref.label} (ID: ${docId}) --- (Content not available) ---\;\n`;
+            }
         }
+        referencedDocumentsContext = tempDocContext;
     }
 
-    // 3. Combine contexts for the API call
-    let combinedContextForApi = '';
-    if (currentDocId) {
-      combinedContextForApi += `--- Document Root (ID: ${currentDocId}) ---\n\n`; // Add Doc ID first
+    // Combine contexts
+    let combinedContextForApi = documentContext ? `--- Current Document Context ---\n${documentContext}` : 'No current document context available.';
+    if (referencedBlocksContext) {
+      combinedContextForApi += referencedBlocksContext; // Already includes "Referenced content:" header
     }
-    if (mainDocumentContext) {
-        combinedContextForApi += mainDocumentContext; // Then add child blocks
+    if (referencedDocumentsContext) {
+        combinedContextForApi += referencedDocumentsContext;
     }
-    if (referencedContext) {
-        if (combinedContextForApi && mainDocumentContext) combinedContextForApi += "\n\n"; // Add separator only if main context exists
-        combinedContextForApi += referencedContext; // Already has header
-    }
-    console.log("[sendMessage] Combined context string prepared for system prompt:", combinedContextForApi); // Log the final combined string
+    console.log("Combined context string prepared for system prompt (length:", combinedContextForApi.length, "):", combinedContextForApi.substring(0, 500) + "...");
 
-    // --- Context Fetching End ---
-
+    // --- 3. Prepare Messages for API --- 
     const conversationHistory = get(messages);
     const historyForApi = conversationHistory
         .filter(msg => msg.role === 'user' || msg.role === 'assistant') 
@@ -696,6 +749,24 @@
     // }
   }
 
+  // --- ADD: Function to handle event from child component --- 
+  async function handleAddDocumentReference(event: CustomEvent<{ docId: string; title: string }>) {
+    const { docId, title } = event.detail;
+    if (!docId || !title) return;
+
+    const newRefId = `doc-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const newReference: ReferenceItem = {
+      id: newRefId,
+      label: title, // Use fetched title
+      blockIds: [docId], // Store the actual ID
+      type: 'document',
+    };
+
+    referenceStore.update(refs => [...refs, newReference]);
+    console.log('Added document reference via event:', newReference);
+    // Child component handles hiding itself
+  }
+
   // --- Selection and Reference Handling ---
 
   // Helper function to find the parent block node with data-node-id
@@ -719,7 +790,7 @@
     if (node instanceof Element) {
       // If node is an element, start closest search from it
       return node.closest('[data-node-id]');
-    } else {
+            } else {
       // If node is not an element (e.g., text node), start closest search from parent
       return parentElement?.closest('[data-node-id]');
     } 
@@ -861,6 +932,11 @@
     window.getSelection()?.removeAllRanges(); // Clear visual selection in editor
   }
 
+  // --- UI Event Handlers & Bindings ---
+  function toggleHistory() {
+    showHistory = !showHistory;
+  }
+
 </script>
 
 <div class="ai-chat-panel">
@@ -872,13 +948,29 @@
           <button class="b3-button b3-button--outline" on:click={saveCurrentConversation}>保存当前对话</button>
       {/if}
       
-      <select class="b3-select" on:change={(e) => loadConversation(e.currentTarget.value)} title="加载历史对话">
-          <option value="" disabled selected>加载历史对话</option>
-          {#each savedConversations as conv (conv.id)}
-              <option value={conv.id}>{conv.name}</option>
-          {/each}
-      </select>
-       {#if currentConversationId}
+      <div class="history-dropdown">
+        <button on:click={toggleHistory} title="加载或删除历史对话">
+          📜 加载历史对话 {showHistory ? '▲' : '▼'} 
+        </button>
+        {#if showHistory}
+          <div class="history-list">
+            {#if savedConversations.length > 0}
+              {#each savedConversations as conversation (conversation.id)}
+                <div class="history-item">
+                  <span class="history-item-name" on:click={() => { loadConversation(conversation.id); showHistory = false; }} title="加载此对话">{conversation.name}</span>
+                  <button class="history-item-delete" on:click={(e) => deleteConversation(conversation.id, e)} title="删除此对话">×</button>
+                </div>
+              {:else}
+                <div class="history-item-empty">没有已保存的对话</div>
+              {/each}
+            {:else}
+               <div class="history-item-empty">没有已保存的对话</div>
+            {/if}
+          </div>
+        {/if}
+      </div>
+      
+      {#if currentConversationId}
         <button 
             class="b3-button b3-button--error" 
             title="删除当前对话"
@@ -908,7 +1000,7 @@
   </div>
 
   <!-- Reference Context Bar -->
-  <ReferenceContext />
+  <ReferenceContext on:addDocumentReference={handleAddDocumentReference} />
 
   <!-- Input Area -->
   <div class="input-area">
@@ -1112,5 +1204,89 @@
   .add-reference-button {
     margin-left: 5px;
     background-color: var(--b3-theme-secondary); /* Different color */
+  }
+
+  .chat-container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    font-family: sans-serif;
+    padding: 5px;
+    box-sizing: border-box;
+  }
+
+  .chat-header {
+    display: flex;
+    gap: 5px;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--b3-theme-surface-lighter);
+    margin-bottom: 5px;
+  }
+
+  .chat-header button {
+    margin-right: 5px;
+    padding: 3px 8px;
+  }
+
+  .history-dropdown {
+    display: inline-block;
+    position: relative;
+  }
+
+  .history-list {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    background-color: var(--b3-theme-surface);
+    border: 1px solid var(--b3-theme-surface-lighter);
+    border-radius: 4px;
+    padding: 5px;
+    min-width: 200px;
+    max-height: 300px;
+    overflow-y: auto;
+    z-index: 10;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+  }
+
+  .history-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px;
+    cursor: pointer;
+    border-radius: 3px;
+  }
+
+  .history-item:hover {
+    background-color: var(--b3-theme-surface-lighter);
+  }
+
+  .history-item-name {
+    flex-grow: 1;
+    margin-right: 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .history-item-delete {
+    background: none;
+    border: none;
+    color: var(--b3-theme-error);
+    font-size: 1.2em;
+    padding: 0 5px;
+    cursor: pointer;
+    line-height: 1;
+    opacity: 0.7;
+  }
+
+  .history-item-delete:hover {
+    opacity: 1;
+  }
+
+  .history-item-empty {
+    padding: 5px;
+    color: var(--b3-theme-on-surface-lighter);
+    font-style: italic;
   }
 </style> 
