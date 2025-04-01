@@ -5,7 +5,7 @@
   import { fetchChatCompletion } from '../utils/api';
   import { markdownToHtml } from '../utils/markdown'; // 引入 markdown 转换函数
   import { writable, get } from 'svelte/store'; // 引入 get
-  import { fetchSyncPost } from 'siyuan'; // Import fetchSyncPost for SQL query
+  // import { fetchSyncPost } from 'siyuan'; // Import fetchSyncPost for SQL query
 
   // Define constants
   const MAX_HISTORY_MESSAGES = 20; // Maximum number of messages (user + assistant) to keep in history for context
@@ -153,7 +153,63 @@
       }
   }
 
-  // 发送消息函数
+  // --- Helper function to fetch structured document context ---
+  async function getStructuredDocumentContext(docId: string): Promise<string> {
+    if (!docId) {
+      console.log("No docId provided for structured context fetch.");
+      return "";
+    }
+    console.log(`Fetching structured context for document ID: ${docId}`);
+    try {
+      const sqlQuery = `SELECT id, type, markdown FROM blocks WHERE parent_id = '${docId}' ORDER BY sort ASC`; 
+      const response = await fetch('/api/query/sql', {
+          method: 'POST',
+          headers: {
+              'Content-Type': 'application/json',
+              // Include Authorization header if needed, check Siyuan API requirements
+              // 'Authorization': `Token YOUR_API_TOKEN_IF_NEEDED` 
+          },
+          body: JSON.stringify({ stmt: sqlQuery }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`SQL query failed with status ${response.status}: ${errorText}`);
+      }
+
+      const result = await response.json();
+
+      if (result.code !== 0) {
+          throw new Error(`API returned error code ${result.code}: ${result.msg}`);
+      }
+      
+      // Log the raw data for debugging
+      console.log("Raw SQL query result data:", result.data);
+
+      if (!result.data || !Array.isArray(result.data)) {
+          console.log("No block data returned from SQL query or data is not an array.");
+          return "Document is empty or contains no text blocks."; // Or return empty string
+      }
+
+      // Format the blocks into a string, including type
+      let formattedContext = "Current document context (Blocks ordered by position):\n";
+      result.data.forEach((block: { id: string; type: string; markdown: string }, index: number) => {
+          // Include block type in the formatted string
+          formattedContext += `--- Block ${index + 1} (ID: ${block.id}, Type: ${block.type}) ---\n${block.markdown || '[Block content not directly in markdown field]'}\n\n`; 
+      });
+      formattedContext += "--- End of Blocks ---";
+      
+      console.log("Formatted structured context length:", formattedContext.length);
+      return formattedContext;
+
+    } catch (error) {
+        console.error("Error fetching or processing structured document context:", error);
+        // Decide how to handle error: return empty string, specific error message, or re-throw?
+        return `Error retrieving document structure: ${error.message}`; 
+    }
+  }
+
+  // --- Message Sending Function ---
   async function sendMessage() {
     if (!userInput.trim() || isLoading) return; // Prevent sending empty or during loading
 
@@ -173,19 +229,20 @@
     scrollToBottom();
 
     // --- Context Fetching --- 
-    let documentContext = '';
+    let structuredContext = ''; // Use new variable name
     if (currentDocId) { // Only fetch if we have a doc ID
         try {
-            console.log(`Attempting to fetch context for document ID: ${currentDocId}`);
-            documentContext = await getDocumentContext();
-            console.log("Fetched document context length:", documentContext?.length ?? 0);
+            console.log(`Attempting to fetch structured context for document ID: ${currentDocId}`);
+            // Call the new function
+            structuredContext = await getStructuredDocumentContext(currentDocId); 
+            console.log("Fetched structured context length:", structuredContext?.length ?? 0);
         } catch (err) {
-            console.error("Error fetching document context:", err);
-            errorMessage = `获取文档上下文失败: ${err.message}`; 
+            console.error("Error fetching structured document context:", err);
+            errorMessage = `获取文档结构上下文失败: ${err.message}`; 
             // Optionally add an error message to the chat?
         }
     } else {
-        console.log("No currentDocId, skipping context fetch.");
+        console.log("No currentDocId, skipping structured context fetch.");
     }
     // --- Context Fetching End ---
 
@@ -200,8 +257,9 @@
 
     // Modify system prompt to include context if available
     let systemPrompt = "You are a helpful AI assistant integrated into Siyuan Note.";
-    if (documentContext) {
-        systemPrompt += `\n\nCurrent document context:\n---\n${documentContext}\n---"`;
+    if (structuredContext) { // Check the new variable
+        // Use the new structured context string
+        systemPrompt += `\n\nCurrent document context (structure and content):\n---\n${structuredContext}\n---`; 
     }
     // Add user's current query to the final message list *after* potentially adding context
     const finalMessagesForApi = [
@@ -257,62 +315,6 @@
       requestAnimationFrame(() => {
         chatHistoryElement.scrollTop = chatHistoryElement.scrollHeight;
       });
-    }
-  }
-
-  // Rewrite getDocumentContext to use exportMdContent API
-  async function getDocumentContext(): Promise<string> {
-    if (!currentDocId) {
-        console.log("getDocumentContext called without currentDocId");
-        return '';
-    }
-
-    console.log(`Using /api/export/exportMdContent with ID: ${currentDocId}`);
-    try {
-        const response = await fetch("/api/export/exportMdContent", { // Changed API endpoint
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ id: currentDocId }) // Pass the document ID
-        });
-
-        const responseText = await response.text(); 
-        console.log(`Raw response from /api/export/exportMdContent (Status: ${response.status}):`, responseText);
-
-        if (!response.ok) {
-            throw new Error(`API request failed with status ${response.status}: ${responseText}`);
-        }
-        
-        if (!responseText) {
-             console.log("exportMdContent API returned an empty response body.");
-             return '';
-        }
-
-        try {
-            const data = JSON.parse(responseText);
-            
-            if (data.code !== 0) {
-                 throw new Error(`API returned error code ${data.code}: ${data.msg}`);
-             }
-
-            // Expecting { code: 0, data: { content: "markdown..." } } based on typical export APIs
-            if (data.data && data.data.content) { 
-                console.log("exportMdContent API successful, parsed JSON, returning content.");
-                return data.data.content; // Return the markdown content
-            } else {
-                console.log("exportMdContent API returned success code, but no data.content found. Response data:", data.data);
-                return '';
-            }
-        } catch (parseError) {
-             console.error("Failed to parse response from exportMdContent as JSON:", parseError);
-             throw new Error(`Failed to parse API response: ${parseError.message}`);
-        }
-
-    } catch (error) {
-        console.error("Error fetching or processing content via exportMdContent:", error);
-        errorMessage = `获取文档上下文时出错: ${error.message}`;
-        return '';
     }
   }
 

@@ -60,3 +60,20 @@
     *   重新启动 Siyuan。
     *   **关键:** 一定要确保 Siyuan 完全重启，否则可能加载的是缓存的旧代码。
 *   **代码警告:** 注意区分构建时的 Warnings (如 `Unused CSS selector`) 和 Errors。Warnings 通常不影响运行，但最好也处理掉。
+
+## 6. 与文档内容交互 (增删改)
+
+*   **核心途径:** 通过调用思源笔记的 **内核 API (Kernel API)** 来实现文档内容的增、删、改操作。
+*   **调用方式:** 使用标准的网络请求方法（如 JavaScript 的 `fetch`）向后端的 `/api/...` 路径发送请求。
+*   **关键 API 接口 (示例):**
+    *   `POST /api/block/insertBlock`: 插入新块。
+    *   `POST /api/block/updateBlock`: 更新现有块。
+    *   `POST /api/block/deleteBlock`: 删除块。
+    *   **注意:** 可能需要探索其他内核 API 以完成更复杂任务，参数细节需参考 API 文档或开发者工具观察。
+*   **重要原则:** **避免直接操作 DOM** 来修改文档内容 (`protyle > wysiwyg` 区域)，应始终通过内核 API 进行。
+*   **前置条件:** 调用 API 前，需要先获取操作目标的上下文信息，如：
+    *   当前文档 ID (`rootID`)
+    *   用户选中的块 ID (`data-node-id`)
+    *   光标位置信息
+    *   选中的文本 (`window.getSelection()`)
+    *   这些信息将作为 API 调用的参数。
