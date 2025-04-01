@@ -26,7 +26,7 @@
 
 ### 安装
 
-1.  从最新的 [GitHub Release](https://github.com/B3000Kcn/siyuan-plugin-canvas/releases) 下载 `package.zip` 文件 (请替换为您的实际链接)。
+1.  从最新的 [GitHub Release](https://github.com/B3000Kcn/siyuan-plugin-canvas/releases) 下载 `package.zip` 文件。
 2.  在思源笔记中，打开 `设置` -> `集市` -> `手动安装插件`。
 3.  选择下载的 `package.zip` 文件。
 4.  在 `已下载` 标签页中启用"智能画布"插件。
