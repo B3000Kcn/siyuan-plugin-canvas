@@ -1,12 +1,60 @@
-.idea
-.vscode
+# Node.js dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment variables
+.env
+.env*.local
+.env.*.local
+
+# IDE files
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS generated files
 .DS_Store
+Thumbs.db
+
+# Test & Coverage
+coverage/
+*.lcov
+
+# Temporary files
+*.tmp
+*.swp
+
+# Specific project folders/files to ignore
+dist_bak/
+dev/
+.specstory/
+index.css
+index.js
+
+# Keep ignoring build artifacts as per previous state
+build/
+tmp/
+package.zip
+
 pnpm-lock.yaml
 package-lock.json
-package.zip
-node_modules
-dev
-dist
-build
-tmp
-.specstory
+思源笔记画布插件-项目计划.md
+AI 助手插件开发备忘录.md

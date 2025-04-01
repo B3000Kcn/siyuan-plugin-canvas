@@ -3,8 +3,8 @@
   "author": "YOUR_GITHUB_USERNAME",
   "version": "0.1.0",
   "displayName": {
-    "zh_CN": "画布 AI 助手 (简化版)",
-    "en_US": "Canvas AI Assistant (Simplified)"
+    "zh_CN": "智能画布",
+    "en_US": "Smart Canvas"
   },
   "description": {
     "zh_CN": "测试基础插件加载",
