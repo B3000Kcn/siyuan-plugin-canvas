@@ -44,6 +44,7 @@
   let errorMessage = '';
   let selectedBlockIds: string[] = []; // Store IDs of currently selected blocks in editor
   let canAddReference = false; // Control the state of the Add Reference button
+  let debounceTimeout: number | null = null; // <-- Add debounce timer variable
 
   // 订阅 store
   const settingsUnsubscribe = settingsStore.subscribe(value => {
@@ -81,8 +82,8 @@
       await tick(); // Wait for initial message render
       scrollToBottom();
 
-      // Add event listener for text selection changes
-      document.addEventListener('mouseup', handleSelectionChange);
+      // Listen for selection changes on the document
+      document.addEventListener('selectionchange', handleSelectionChange);
   });
 
   onDestroy(() => {
@@ -91,7 +92,7 @@
       currentDocIdUnsubscribe(); // <-- 取消订阅文档 ID
       currentDocPathUnsubscribe();
       // Remove event listener
-      document.removeEventListener('mouseup', handleSelectionChange);
+      document.removeEventListener('selectionchange', handleSelectionChange);
   });
 
   // --- 对话管理函数 --- 
@@ -229,12 +230,13 @@
     if (!blockIds || blockIds.length === 0) {
       return "";
     }
-    console.log(`Fetching context for specific block IDs: ${blockIds.join(', ')}`);
+    console.log(`[getReferencedBlocksContext] Fetching context for specific block IDs: ${blockIds.join(', ')}`); // Log entry
     try {
       // Ensure IDs are properly quoted for the SQL IN clause
       const quotedIds = blockIds.map(id => `'${id}'`).join(', ');
       const sqlQuery = `SELECT id, type, markdown FROM blocks WHERE id IN (${quotedIds})`; 
-      
+      console.log(`[getReferencedBlocksContext] Executing SQL: ${sqlQuery}`); // Log SQL query
+
       // We need to preserve the original order as much as possible, 
       // but SQL IN doesn't guarantee order. We fetch and then re-order.
 
@@ -262,7 +264,7 @@
           return "Could not retrieve content for referenced blocks.";
       }
 
-      console.log("Raw SQL query result data for references:", result.data);
+      console.log("[getReferencedBlocksContext] Raw SQL query result data for references:", result.data); // Log raw data
 
       // Re-order results based on the original blockIds array
       const fetchedBlocksMap = new Map(result.data.map((block: {id: string}) => [block.id, block]));
@@ -275,11 +277,11 @@
       });
       formattedContext += "--- End of Referenced Blocks ---";
 
-      console.log("Formatted referenced context length:", formattedContext.length);
+      console.log("[getReferencedBlocksContext] Formatted referenced context string:", formattedContext); // Log the final formatted string
       return formattedContext;
 
     } catch (error) {
-        console.error("Error fetching or processing referenced block context:", error);
+        console.error("[getReferencedBlocksContext] Error fetching or processing referenced block context:", error); // Log error
         return `Error retrieving referenced content: ${error.message}`; 
     }
   }
@@ -526,12 +528,12 @@
     // 2. Fetch referenced context if references exist
     if (selectionReferences.length > 0) {
         const referencedBlockIds = Array.from(new Set(selectionReferences.flatMap(ref => ref.blockIds)));
-        console.log("Found selection references, fetching referenced context for IDs:", referencedBlockIds);
+        console.log("[sendMessage] Found selection references, preparing to fetch context for IDs:", referencedBlockIds); // Log IDs being used
         try {
             referencedContext = await getReferencedBlocksContext(referencedBlockIds);
-            console.log("Fetched referenced context length:", referencedContext?.length ?? 0);
+            console.log("[sendMessage] Fetched referenced context length:", referencedContext?.length ?? 0);
         } catch (err) {
-            console.error("Error fetching referenced block context:", err);
+            console.error("[sendMessage] Error fetching referenced block context:", err);
             errorMessage = `获取引用块上下文失败: ${err.message}`;
         }
     }
@@ -545,9 +547,10 @@
         combinedContextForApi += mainDocumentContext; // Then add child blocks
     }
     if (referencedContext) {
-        if (combinedContextForApi) combinedContextForApi += "\n\n"; // Add separator
+        if (combinedContextForApi && mainDocumentContext) combinedContextForApi += "\n\n"; // Add separator only if main context exists
         combinedContextForApi += referencedContext; // Already has header
     }
+    console.log("[sendMessage] Combined context string prepared for system prompt:", combinedContextForApi); // Log the final combined string
 
     // --- Context Fetching End ---
 
@@ -561,7 +564,7 @@
         }));
 
     // Modify system prompt to include context if available
-    let systemPrompt = `You are a helpful AI assistant integrated into Siyuan Note.\\nYou can interact with the document content based on the provided context.\\n\\n**Understanding the Context:**\\nThe context below shows the structure and content of the current document or specific blocks selected by the user.\\nEach block is listed with its sequential number, unique ID, and type, like this:\\n--- Block N (ID: yyyy-mmdd-xxxxxx, Type: p) ---\\n[Markdown content of the block]\\n---\\n+(Referenced blocks, if any, will be listed under \\"Referenced content:\\")\\n\\n**Performing Actions (Delete/Update):**\\nWhen the user asks you to modify the document (e.g., \\"delete the second paragraph\\\", \\"update the list item with ID xxx\\\"):\\n1. Carefully identify the **exact block ID** (e.g., yyyy-mmdd-xxxxxx) from the context that corresponds to the user\\'s request.\\n2. Output **only** a single JSON command block using one of the following formats. **You MUST use the specific block ID found in the context.**\\n\\n   *   To delete a block: \\\`\\\`\\\`json {\\\"action\\\": \\\"delete\\\", \\\"block_id\\\": \\\"TARGET_BLOCK_ID_FROM_CONTEXT\\\"} \\\`\\\`\\\`\\\n   *   To update a block: \\\`\\\`\\\`json {\\\"action\\\": \\\"update\\\", \\\"block_id\\\": \\\"TARGET_BLOCK_ID_FROM_CONTEXT\\\", \\\"new_markdown\\\": \\\"NEW_MARKDOWN_CONTENT\\\"} \\\`\\\`\\\`\\\n   *   To insert a block: \\\`\\\`\\\`json {\\\"action\\\": \\\"insert\\\", \\\"previousID\\\": \\\"ID_OF_BLOCK_BEFORE\\\", \\\"parentID\\\": null, \\\"markdown\\\": \\\"NEW_MARKDOWN_CONTENT\\\"} \\\`\\\`\\\` (Note: parentID is usually null for insertions relative to existing blocks)\\\n\\n**IMPORTANT RULES:**\\n*   **Action Intent:** Determine the user\\\'s core goal:\\\n    *   \\'update\\': User wants to *modify, update, or replace* content of an *existing* block.\\\n    *   \\'delete\\': User wants to *remove or delete* an *existing* block.\\\n    *   \\'insert\\': User wants to *add, insert, create, or write* *new* content/blocks.\\\n    *   **If unsure about intent, ASK the user.**\\\n*   **Insert Command - How to Set IDs (ONLY relative to specific Block IDs):**\\\n    *   **Goal: Insert AFTER Block A?** (e.g., \\"add below Block A\\\", \\"insert after selection 1\\\")\\\n        *   Find Block A\\\'s ID in the context (\\'BLOCK_A_ID\\').\\\n        *   Set \\'previousID\\' = \\'BLOCK_A_ID\\'.\\\n        *   Set \\'parentID\\' = null (or omit).\\\n    *   **Goal: Insert BEFORE Block B?** (e.g., \\"insert before Block B\\\", \\"add above selection 1\\\")\\\n        *   Find the ID of the block *immediately preceding* Block B in the context (\\'BLOCK_B_minus_1_ID\\'). **There MUST be a preceding block.**\\\n        *   Set \\'previousID\\' = \\'BLOCK_B_minus_1_ID\\'.\\\n        *   Set \\'parentID\\' = null (or omit).\\\n    *   **Goal: Insert BETWEEN Block A and Block B?** (e.g., \\"put this between block 1 and 2\\\")\\\n        *   Treat this as \\"Insert AFTER Block A\\\".\\\n        *   Find Block A\\\'s ID (\\'BLOCK_A_ID\\').\\\n        *   Set \\'previousID\\' = \\'BLOCK_A_ID\\'.\\\n        *   Set \\'parentID\\' = null (or omit).\\\n    *   **Content:** The \\'markdown\\' field must contain the complete Markdown content for the new block(s).\\\n*   **NO Fuzzy Locations:** Requests like \\"insert at the beginning\\\", \\"insert at the end\\\", or \\"insert here\\\" are **NOT SUPPORTED** for direct action. See \\"Ask If Unsure\\\".\\\n*   **Referenced Context First:** If \\\'Referenced content\\\' is provided and the user\\\'s request mentions the selection/reference (e.g., \\"update selection 1\\\", \\"insert after the selected paragraph\\\"), **MUST** use the block ID from the \\\'Referenced content\\\' section for targeting (\\\'block_id\\\' for update/delete, \\\'previousID\\' for insert after). Only use IDs from the main document context if the user explicitly targets other parts.\\\n*   **Use Exact IDs:** Always use the exact block IDs shown in parentheses (ID: ...) from the context. Never guess IDs or use block numbers like \\"Block 3\\\".\\\n*   **Ask If Unsure (CRITICAL):** If the user\\\'s request is ambiguous about the action (update/delete/insert), the target block/location, or if you cannot confidently find the necessary IDs in the context according to these rules, **you MUST ask the user for clarification**. \\\n    *   **Specifically:** If the user asks to insert at the beginning, end, or uses vague terms without specifying a block ID, you MUST reply asking them to provide the **ID of the block** they want to insert **before** or **after**.\\\n    *   Example clarifying question: \\\"To insert the content, please tell me the ID of the block you want to insert it before or after.\\\"\\\n    *   Do NOT guess or make assumptions.\\\n*   **Normal Chat:** For general questions, summaries, or explanations that don\\\'t involve changing the document, respond normally in natural language without any JSON command block.\\\n\\\n--- Context Starts Below:`; // The actual context will be appended later
+    let systemPrompt = `You are a helpful AI assistant integrated into Siyuan Note.\\nYou can interact with the document content based on the provided context.\\n\\n**Understanding the Context:**\\nThe context below shows the structure and content of the current document or specific blocks selected by the user.\\nEach block is listed with its sequential number, unique ID, and type, like this:\\n--- Block N (ID: yyyy-mmdd-xxxxxx, Type: p) ---\\n[Markdown content of the block]\\n---\\n+(Referenced blocks, if any, will be listed under \\"Referenced content:\\")\\n\\n**Performing Actions (Delete/Update):**\\nWhen the user asks you to modify the document (e.g., \\"delete the second paragraph\\\", \\"update the list item with ID xxx\\\"):\\n1. Carefully identify the **exact block ID** (e.g., yyyy-mmdd-xxxxxx) from the context that corresponds to the user\\'s request.\\n2. Output **only** a single JSON command block using one of the following formats. **You MUST use the specific block ID found in the context.**\\n\\n   *   To delete a block: \\\`\\\`\\\`json {\\\"action\\\": \\\"delete\\\", \\\"block_id\\\": \\\"TARGET_BLOCK_ID_FROM_CONTEXT\\\"} \\\`\\\`\\\`\\\n   *   To update a block: \\\`\\\`\\\`json {\\\"action\\\": \\\"update\\\", \\\"block_id\\\": \\\"TARGET_BLOCK_ID_FROM_CONTEXT\\\", \\\"new_markdown\\\": \\\"NEW_MARKDOWN_CONTENT\\\"} \\\`\\\`\\\`\\\n   *   To insert a block: \\\`\\\`\\\`json {\\\"action\\\": \\\"insert\\\", \\\"previousID\\\": \\\"ID_OF_BLOCK_BEFORE\\\", \\\"parentID\\\": null, \\\"markdown\\\": \\\"NEW_MARKDOWN_CONTENT\\\"} \\\`\\\`\\\` (Note: parentID is usually null for insertions relative to existing blocks)\\\n\\n**IMPORTANT RULES:**\\n*   **Action Intent:** Determine the user\\\'s core goal:\\\n    *   \\'update\\': User wants to *modify, update, or replace* content of an *existing* block.\\\n    *   \\'delete\\': User wants to *remove or delete* an *existing* block.\\\n    *   \\'insert\\': User wants to *add, insert, create, or write* *new* content/blocks.\\\n    *   **If unsure about intent, ASK the user.**\\\n*   **Handling Multi-Block References (CRITICAL - READ CAREFULLY!):** When a reference label (e.g., "Selection 1") points to multiple block IDs in the \\\`Referenced content\\\`:\\n    *   **Information Requests:** If asked for information (e.g., "What is in Selection 1?", "Summarize Selection 1"), you **MUST** address or summarize the content of **ALL** associated blocks in your response.\\n    *   **Action Requests (e.g., "delete", "update", "insert after Selection 1"):** \\n        1.  You **MUST NOT** generate multiple commands for this single user request.\\n        2.  You **MUST NOT** guess which block to act upon.\\n        3.  You **MUST ALWAYS ask the user for clarification FIRST**. \\n        4.  **Your clarification response MUST be ONLY natural language**, asking which specific block ID they want the action performed on. Example: \\"Selection 1 includes Block ID xxx and Block ID yyy. Which one do you want to [action]?\\" **DO NOT include any JSON command block in your clarification response.**\\n        5.  **Only AFTER** the user responds specifying a single ID, you can then generate a **single** command targeting that user-specified ID.\\n*   **Insert Command - How to Set IDs (ONLY relative to specific Block IDs):**\\\n    *   **Goal: Insert AFTER Block A?** (e.g., \\"add below Block A\\\", \\"insert after selection 1\\\")\\\n        *   Find Block A\\\'s ID in the context (\\\'BLOCK_A_ID\\\').\\\n        *   Set \\\'previousID\\\' = \\\'BLOCK_A_ID\\\'.\\\n        *   Set \\\'parentID\\\' = null (or omit).\\\n    *   **Goal: Insert BEFORE Block B?** (e.g., \\"insert before Block B\\\", \\"add above selection 1\\\")\\\n        *   Find the ID of the block *immediately preceding* Block B in the context (\\\'BLOCK_B_minus_1_ID\\\'). **There MUST be a preceding block.**\\\n        *   Set \\\'previousID\\\' = \\\'BLOCK_B_minus_1_ID\\\'.\\\n        *   Set \\\'parentID\\\' = null (or omit).\\\n    *   **Goal: Insert BETWEEN Block A and Block B?** (e.g., \\"put this between block 1 and 2\\\")\\\n        *   Treat this as \\"Insert AFTER Block A\\\".\\\n        *   Find Block A\\\'s ID (\\\'BLOCK_A_ID\\\').\\\n        *   Set \\\'previousID\\\' = \\\'BLOCK_A_ID\\\'.\\\n        *   Set \\\'parentID\\\' = null (or omit).\\\n    *   **Content:** The \\\'markdown\\\' field must contain the complete Markdown content for the new block(s).\\\n*   **NO Fuzzy Locations:** Requests like \\\"insert at the beginning\\\", \\\"insert at the end\\\", or \\\"insert here\\\" are **NOT SUPPORTED** for direct action. See \\\"Ask If Unsure\\\".\\\n*   **Referenced Context First:** If \\\'Referenced content\\\' is provided and the user\\\'s request mentions the selection/reference (e.g., \\\"update selection 1\\\", \\\"insert after the selected paragraph\\\"), **MUST** use the block ID(s) from the \\\'Referenced content\\\' section for targeting.\\\n*   **Use Exact IDs:** Always use the exact block IDs shown in parentheses (ID: ...) from the context. Never guess IDs or use block numbers like \\\"Block 3\\\".\\\n*   **Ask If Unsure (CRITICAL):** If the user\\\'s request is ambiguous about the action (update/delete/insert), the target block/location, or if you cannot confidently find the necessary IDs in the context according to these rules (including the multi-block clarification rule), **you MUST ask the user for clarification**. \\\n    *   **Specifically:** If the user asks to insert at the beginning, end, or uses vague terms without specifying a block ID, you MUST reply asking them to provide the **ID of the block** they want to insert **before** or **after**.\\\n    *   Example clarifying question: \\\"To insert the content, please tell me the ID of the block you want to insert it before or after.\\\"\\\n    *   Do NOT guess or make assumptions.\\\n*   **Normal Chat:** For general questions, summaries, or explanations that don\\\'t involve changing the document, respond normally in natural language without any JSON command block.\\\n\\\n--- Context Starts Below:`;
 
     if (combinedContextForApi) { // Check the combined context
         // Use the new structured context string
@@ -695,37 +698,57 @@
 
   // --- Selection and Reference Handling ---
 
-  // Function to find the closest parent block node
-  function findParentBlockNode(node: Node): HTMLElement | null {
-    let current: Node | null = node;
-    while (current && current !== document.body) {
-      if (current instanceof HTMLElement && current.dataset.nodeId) {
-        return current;
-      }
-      current = current.parentNode;
+  // Helper function to find the parent block node with data-node-id
+  function findParentBlockNode(node: Node | null): HTMLElement | null {
+    if (!node) {
+      return null;
     }
-    return null;
+
+    // 1. Check if the node itself is the block node
+    if (node instanceof HTMLElement && node.dataset.nodeId) {
+        return node;
+    }
+
+    // 2. Check if the parent element is the block node
+    const parentElement = node.parentElement;
+    if (parentElement instanceof HTMLElement && parentElement.dataset.nodeId) {
+        return parentElement;
+    }
+
+    // 3. Traverse upwards using closest as a fallback
+    if (node instanceof Element) {
+      // If node is an element, start closest search from it
+      return node.closest('[data-node-id]');
+    } else {
+      // If node is not an element (e.g., text node), start closest search from parent
+      return parentElement?.closest('[data-node-id]');
+    } 
   }
 
   // Function to get IDs of currently selected blocks in the Siyuan editor
   function getSelectedBlockIds(): string[] {
+    console.groupCollapsed("[getSelectedBlockIds] Check"); // Start log group
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed || !selection.anchorNode || !selection.focusNode) {
-      // console.log("No valid selection found.");
+      console.log("No valid selection found.");
+      console.groupEnd(); // End log group
       return [];
     }
 
     const range = selection.getRangeAt(0);
-    // console.log("Selection range:", range);
+    console.log("Selection range:", range);
+    console.log("Start Container:", range.startContainer, "Offset:", range.startOffset);
+    console.log("End Container:", range.endContainer, "Offset:", range.endOffset);
 
     // Check if selection is within a Protyle editor
     const startContainer = range.startContainer;
     const editorElement = (startContainer instanceof Node && startContainer.nodeType === Node.ELEMENT_NODE ? startContainer as Element : startContainer.parentElement)?.closest('.protyle-wysiwyg');
     if (!editorElement) {
-         // console.log("Selection is not inside a protyle editor.");
+         console.log("Selection is not inside a protyle editor.");
+         console.groupEnd(); // End log group
          return []; // Selection not in a known editor
      }
-    // console.log("Selection is inside editor:", editorElement);
+    console.log("Selection is inside editor:", editorElement);
 
     const startBlockNode = findParentBlockNode(range.startContainer);
     const endBlockNode = findParentBlockNode(range.endContainer);
@@ -735,34 +758,41 @@
 
     if (!startBlockNode && !endBlockNode) {
       console.log("Neither start nor end of selection is inside a block.");
+      console.groupEnd(); // End log group
       return [];
     }
 
     // If selection is entirely within one block
     if (startBlockNode && startBlockNode === endBlockNode) {
         console.log("Selection within single block:", startBlockNode.dataset.nodeId);
+        console.groupEnd(); // End log group
         return [startBlockNode.dataset.nodeId];
     }
 
     // If selection spans multiple blocks (or starts/ends outside)
     const allBlocksInEditor = Array.from(editorElement.querySelectorAll('[data-node-id]')) as HTMLElement[];
+    console.log("All blocks in editor:", allBlocksInEditor.map(b => b.dataset.nodeId));
     const blockIds: string[] = [];
 
     // Determine the effective start and end nodes for range calculation
-    const rangeStartNode = startBlockNode || allBlocksInEditor[0]; // Fallback to first block if start is outside
-    const rangeEndNode = endBlockNode || allBlocksInEditor[allBlocksInEditor.length - 1]; // Fallback to last block if end is outside
+    // Use the block nodes we found. If one is missing, we might have issues.
+    const rangeStartNode = startBlockNode; 
+    const rangeEndNode = endBlockNode; 
 
-    let startIndex = allBlocksInEditor.findIndex(block => block === rangeStartNode);
-    let endIndex = allBlocksInEditor.findIndex(block => block === rangeEndNode);
+    let startIndex = rangeStartNode ? allBlocksInEditor.findIndex(block => block === rangeStartNode) : -1;
+    let endIndex = rangeEndNode ? allBlocksInEditor.findIndex(block => block === rangeEndNode) : -1;
 
     console.log(`Calculated indices: Start=${startIndex}, End=${endIndex}`);
 
+    // Handle cases where start or end block couldn't be reliably found in the list
     if (startIndex === -1 || endIndex === -1) {
-        console.error("Could not reliably determine selection range indices within editor blocks.");
-        // Fallback: return the blocks we did find, if any
-        if (startBlockNode) blockIds.push(startBlockNode.dataset.nodeId);
-        if (endBlockNode && endBlockNode !== startBlockNode) blockIds.push(endBlockNode.dataset.nodeId);
-        return blockIds;
+        console.warn("Could not reliably determine selection range indices within editor blocks. Returning found blocks only.");
+        // Fallback: return only the block IDs that were successfully found
+        if (startBlockNode?.dataset.nodeId) blockIds.push(startBlockNode.dataset.nodeId);
+        if (endBlockNode?.dataset.nodeId && endBlockNode !== startBlockNode) blockIds.push(endBlockNode.dataset.nodeId);
+        console.log("Final selected block IDs (fallback):", blockIds);
+        console.groupEnd(); // End log group
+        return Array.from(new Set(blockIds)); 
     }
 
     // Ensure startIndex <= endIndex
@@ -779,17 +809,29 @@
     }
 
     console.log("Final selected block IDs:", blockIds);
+    console.groupEnd(); // End log group
     return Array.from(new Set(blockIds)); // Ensure uniqueness, though should be unique by logic
   }
 
-  // Event handler for mouseup (selection change)
+  // Debounced selection change handler
   function handleSelectionChange() {
-    // Use setTimeout to allow the selection object to update fully
-    setTimeout(() => {
-        selectedBlockIds = getSelectedBlockIds();
-        canAddReference = selectedBlockIds.length > 0;
-        // console.log("Selection changed, block IDs:", selectedBlockIds, "Can add ref:", canAddReference);
-    }, 100); // Small delay might be needed
+    if (debounceTimeout) clearTimeout(debounceTimeout);
+    debounceTimeout = window.setTimeout(() => {
+        const currentSelectedIds = getSelectedBlockIds(); // Get IDs
+        const newCanAddRef = currentSelectedIds.length > 0;
+
+        // If we found valid block IDs, update the state and enable the button
+        if (newCanAddRef) {
+            selectedBlockIds = currentSelectedIds;
+            canAddReference = true;
+            console.log("Selection changed (debounced), FOUND blocks, Enabling button. IDs:", selectedBlockIds);
+        } else {
+            // If no valid blocks found, DO NOTHING. 
+            // This prevents a subsequent invalid selection event from disabling the button 
+            // after a valid selection was made.
+            console.log("Selection changed (debounced), NO valid blocks found, button state remains:", canAddReference);
+        }
+    }, 150); // Adjust debounce delay as needed (e.g., 150-250ms)
   }
 
   // Function to add the current selection as a reference
@@ -808,7 +850,10 @@
       type: 'selection',
     };
 
+    console.log('[addSelectionReference] About to update referenceStore. Current state:', get(referenceStore));
+    console.log('[addSelectionReference] Adding new reference:', newReference);
     referenceStore.update(refs => [...refs, newReference]);
+    console.log('[addSelectionReference] Updated referenceStore state:', get(referenceStore));
 
     // Clear selection state after adding
     selectedBlockIds = [];
