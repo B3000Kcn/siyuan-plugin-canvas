@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte'; // 导入 onMount 和 tick
-  import { settingsStore, conversationsStore, currentDocumentIdStore, currentDocumentPathStore, type AppSettings, type SavedConversation, type ChatMessage } from '../stores'; // <-- 导入 store 和类型
+  import { settingsStore, conversationsStore, currentDocumentIdStore, currentDocumentPathStore, referenceStore, type AppSettings, type SavedConversation, type ChatMessage, type ReferenceItem } from '../stores'; // <-- 导入 store 和类型
   import { onDestroy } from 'svelte'; // 需要 onDestroy 来取消订阅
   import { fetchChatCompletion } from '../utils/api';
   import { markdownToHtml } from '../utils/markdown'; // 引入 markdown 转换函数
   import { writable, get } from 'svelte/store'; // 引入 get
+  import ReferenceContext from './ReferenceContext.svelte'; // <-- 导入引用栏组件
   // import { fetchSyncPost } from 'siyuan'; // Import fetchSyncPost for SQL query
 
   // Define constants
@@ -41,6 +42,8 @@
   let currentDocId: string | null = null; // 新增：存储当前文档 ID
   let currentDocPath: string | null = null; // Add state for path
   let errorMessage = '';
+  let selectedBlockIds: string[] = []; // Store IDs of currently selected blocks in editor
+  let canAddReference = false; // Control the state of the Add Reference button
 
   // 订阅 store
   const settingsUnsubscribe = settingsStore.subscribe(value => {
@@ -56,6 +59,9 @@
   });
   const currentDocPathUnsubscribe = currentDocumentPathStore.subscribe(value => {
     currentDocPath = value;
+  });
+  const referenceUnsubscribe = referenceStore.subscribe(value => {
+    // No need to handle reference store changes in this component
   });
   // 注意：在 Svelte 组件的 <script> 顶层订阅 store 会自动处理取消订阅
   // 如果在 onMount 或其他函数内部订阅，需要在 onDestroy 中取消订阅
@@ -74,6 +80,9 @@
       loadConversationsFromStorage(); // Placeholder
       await tick(); // Wait for initial message render
       scrollToBottom();
+
+      // Add event listener for text selection changes
+      document.addEventListener('mouseup', handleSelectionChange);
   });
 
   onDestroy(() => {
@@ -81,6 +90,8 @@
       conversationsUnsubscribe();
       currentDocIdUnsubscribe(); // <-- 取消订阅文档 ID
       currentDocPathUnsubscribe();
+      // Remove event listener
+      document.removeEventListener('mouseup', handleSelectionChange);
   });
 
   // --- 对话管理函数 --- 
@@ -209,6 +220,66 @@
     }
   }
 
+  // --- Helper function to fetch context for SPECIFIC block IDs ---
+  async function getReferencedBlocksContext(blockIds: string[]): Promise<string> {
+    if (!blockIds || blockIds.length === 0) {
+      return "";
+    }
+    console.log(`Fetching context for specific block IDs: ${blockIds.join(', ')}`);
+    try {
+      // Ensure IDs are properly quoted for the SQL IN clause
+      const quotedIds = blockIds.map(id => `'${id}'`).join(', ');
+      const sqlQuery = `SELECT id, type, markdown FROM blocks WHERE id IN (${quotedIds})`; 
+      
+      // We need to preserve the original order as much as possible, 
+      // but SQL IN doesn't guarantee order. We fetch and then re-order.
+
+      const response = await fetch('/api/query/sql', {
+          method: 'POST',
+          headers: {
+              'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ stmt: sqlQuery }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`SQL query for references failed with status ${response.status}: ${errorText}`);
+      }
+
+      const result = await response.json();
+
+      if (result.code !== 0) {
+          throw new Error(`API returned error code ${result.code} for references: ${result.msg}`);
+      }
+
+      if (!result.data || !Array.isArray(result.data)) {
+          console.log("No block data returned for referenced IDs.");
+          return "Could not retrieve content for referenced blocks.";
+      }
+
+      console.log("Raw SQL query result data for references:", result.data);
+
+      // Re-order results based on the original blockIds array
+      const fetchedBlocksMap = new Map(result.data.map((block: {id: string}) => [block.id, block]));
+      const orderedBlocks = blockIds.map(id => fetchedBlocksMap.get(id)).filter(Boolean);
+
+      // Format the blocks into a string
+      let formattedContext = "Referenced content:\n";
+      orderedBlocks.forEach((block: { id: string; type: string; markdown: string }, index: number) => {
+          formattedContext += `--- Referenced Block ${index + 1} (ID: ${block.id}, Type: ${block.type}) ---\n${block.markdown || '[Block content not directly in markdown field]'}\n\n`; 
+      });
+      formattedContext += "--- End of Referenced Blocks ---";
+
+      console.log("Formatted referenced context length:", formattedContext.length);
+      return formattedContext;
+
+    } catch (error) {
+        console.error("Error fetching or processing referenced block context:", error);
+        return `Error retrieving referenced content: ${error.message}`; 
+    }
+  }
+
   // --- Message Sending Function ---
   async function sendMessage() {
     if (!userInput.trim() || isLoading) return; // Prevent sending empty or during loading
@@ -229,21 +300,48 @@
     scrollToBottom();
 
     // --- Context Fetching --- 
-    let structuredContext = ''; // Use new variable name
-    if (currentDocId) { // Only fetch if we have a doc ID
+    let mainDocumentContext = '';
+    let referencedContext = '';
+    const currentReferences = get(referenceStore);
+    const selectionReferences = currentReferences.filter(ref => ref.type === 'selection');
+
+    // 1. Always fetch main document context if currentDocId exists
+    if (currentDocId) {
+        console.log("Fetching structured context for document ID:", currentDocId);
         try {
-            console.log(`Attempting to fetch structured context for document ID: ${currentDocId}`);
-            // Call the new function
-            structuredContext = await getStructuredDocumentContext(currentDocId); 
-            console.log("Fetched structured context length:", structuredContext?.length ?? 0);
+            mainDocumentContext = await getStructuredDocumentContext(currentDocId);
+            console.log("Fetched main document context length:", mainDocumentContext?.length ?? 0);
         } catch (err) {
             console.error("Error fetching structured document context:", err);
-            errorMessage = `获取文档结构上下文失败: ${err.message}`; 
-            // Optionally add an error message to the chat?
+            errorMessage = `获取文档结构上下文失败: ${err.message}`;
         }
     } else {
-        console.log("No currentDocId, skipping structured context fetch.");
+        console.log("No currentDocId, skipping main document context fetch.");
     }
+
+    // 2. Fetch referenced context if references exist
+    if (selectionReferences.length > 0) {
+        const referencedBlockIds = Array.from(new Set(selectionReferences.flatMap(ref => ref.blockIds)));
+        console.log("Found selection references, fetching referenced context for IDs:", referencedBlockIds);
+        try {
+            referencedContext = await getReferencedBlocksContext(referencedBlockIds);
+            console.log("Fetched referenced context length:", referencedContext?.length ?? 0);
+        } catch (err) {
+            console.error("Error fetching referenced block context:", err);
+            errorMessage = `获取引用块上下文失败: ${err.message}`;
+        }
+    }
+
+    // 3. Combine contexts for the API call
+    let combinedContextForApi = '';
+    if (mainDocumentContext) {
+        combinedContextForApi += mainDocumentContext; // Already has header
+    }
+    if (referencedContext) {
+        if (combinedContextForApi) combinedContextForApi += "\n\n"; // Add separator
+        combinedContextForApi += referencedContext; // Already has header
+    }
+
     // --- Context Fetching End ---
 
     const conversationHistory = get(messages);
@@ -257,9 +355,10 @@
 
     // Modify system prompt to include context if available
     let systemPrompt = "You are a helpful AI assistant integrated into Siyuan Note.";
-    if (structuredContext) { // Check the new variable
+    if (combinedContextForApi) { // Check the combined context
         // Use the new structured context string
-        systemPrompt += `\n\nCurrent document context (structure and content):\n---\n${structuredContext}\n---`; 
+        // Context string already contains appropriate header (Referenced or Structured)
+        systemPrompt += `\n\n${combinedContextForApi}`; 
     }
     // Add user's current query to the final message list *after* potentially adding context
     const finalMessagesForApi = [
@@ -303,6 +402,11 @@
         console.log("Error message added to store:", get(messages)); // Log after update
     } finally {
         isLoading = false;
+        // Clear selection references AFTER the API call attempt
+        if (selectionReferences.length > 0) {
+            console.log("Clearing selection references.");
+            referenceStore.update(refs => refs.filter(ref => ref.type !== 'selection'));
+        }
         await tick(); // Wait for UI update before scrolling
         scrollToBottom(); 
     }
@@ -331,6 +435,129 @@
     // if (storedMessages) {
     //     messages.set(JSON.parse(storedMessages).map(m => ({...m, html: m.role === 'assistant' ? markdownToHtml(m.content) : undefined })));
     // }
+  }
+
+  // --- Selection and Reference Handling ---
+
+  // Function to find the closest parent block node
+  function findParentBlockNode(node: Node): HTMLElement | null {
+    let current: Node | null = node;
+    while (current && current !== document.body) {
+      if (current instanceof HTMLElement && current.dataset.nodeId) {
+        return current;
+      }
+      current = current.parentNode;
+    }
+    return null;
+  }
+
+  // Function to get IDs of currently selected blocks in the Siyuan editor
+  function getSelectedBlockIds(): string[] {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed || !selection.anchorNode || !selection.focusNode) {
+      // console.log("No valid selection found.");
+      return [];
+    }
+
+    const range = selection.getRangeAt(0);
+    // console.log("Selection range:", range);
+
+    // Check if selection is within a Protyle editor
+    const startContainer = range.startContainer;
+    const editorElement = (startContainer instanceof Node && startContainer.nodeType === Node.ELEMENT_NODE ? startContainer as Element : startContainer.parentElement)?.closest('.protyle-wysiwyg');
+    if (!editorElement) {
+         // console.log("Selection is not inside a protyle editor.");
+         return []; // Selection not in a known editor
+     }
+    // console.log("Selection is inside editor:", editorElement);
+
+    const startBlockNode = findParentBlockNode(range.startContainer);
+    const endBlockNode = findParentBlockNode(range.endContainer);
+
+    console.log("Found start block node:", startBlockNode?.dataset?.nodeId, startBlockNode);
+    console.log("Found end block node:", endBlockNode?.dataset?.nodeId, endBlockNode);
+
+    if (!startBlockNode && !endBlockNode) {
+      console.log("Neither start nor end of selection is inside a block.");
+      return [];
+    }
+
+    // If selection is entirely within one block
+    if (startBlockNode && startBlockNode === endBlockNode) {
+        console.log("Selection within single block:", startBlockNode.dataset.nodeId);
+        return [startBlockNode.dataset.nodeId];
+    }
+
+    // If selection spans multiple blocks (or starts/ends outside)
+    const allBlocksInEditor = Array.from(editorElement.querySelectorAll('[data-node-id]')) as HTMLElement[];
+    const blockIds: string[] = [];
+
+    // Determine the effective start and end nodes for range calculation
+    const rangeStartNode = startBlockNode || allBlocksInEditor[0]; // Fallback to first block if start is outside
+    const rangeEndNode = endBlockNode || allBlocksInEditor[allBlocksInEditor.length - 1]; // Fallback to last block if end is outside
+
+    let startIndex = allBlocksInEditor.findIndex(block => block === rangeStartNode);
+    let endIndex = allBlocksInEditor.findIndex(block => block === rangeEndNode);
+
+    console.log(`Calculated indices: Start=${startIndex}, End=${endIndex}`);
+
+    if (startIndex === -1 || endIndex === -1) {
+        console.error("Could not reliably determine selection range indices within editor blocks.");
+        // Fallback: return the blocks we did find, if any
+        if (startBlockNode) blockIds.push(startBlockNode.dataset.nodeId);
+        if (endBlockNode && endBlockNode !== startBlockNode) blockIds.push(endBlockNode.dataset.nodeId);
+        return blockIds;
+    }
+
+    // Ensure startIndex <= endIndex
+    if (startIndex > endIndex) {
+        [startIndex, endIndex] = [endIndex, startIndex];
+        console.log("Swapped indices");
+    }
+
+    for (let i = startIndex; i <= endIndex; i++) {
+        const blockNode = allBlocksInEditor[i];
+        if (blockNode?.dataset.nodeId) {
+            blockIds.push(blockNode.dataset.nodeId);
+        }
+    }
+
+    console.log("Final selected block IDs:", blockIds);
+    return Array.from(new Set(blockIds)); // Ensure uniqueness, though should be unique by logic
+  }
+
+  // Event handler for mouseup (selection change)
+  function handleSelectionChange() {
+    // Use setTimeout to allow the selection object to update fully
+    setTimeout(() => {
+        selectedBlockIds = getSelectedBlockIds();
+        canAddReference = selectedBlockIds.length > 0;
+        // console.log("Selection changed, block IDs:", selectedBlockIds, "Can add ref:", canAddReference);
+    }, 100); // Small delay might be needed
+  }
+
+  // Function to add the current selection as a reference
+  function addSelectionReference() {
+    if (!canAddReference || selectedBlockIds.length === 0) return;
+
+    const newRefId = `sel-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    // Simple label for now
+    const existingRefs = get(referenceStore);
+    const newLabel = `选区 ${existingRefs.filter(r => r.type === 'selection').length + 1}`;
+
+    const newReference: ReferenceItem = {
+      id: newRefId,
+      label: newLabel,
+      blockIds: [...selectedBlockIds], // Clone the array
+      type: 'selection',
+    };
+
+    referenceStore.update(refs => [...refs, newReference]);
+
+    // Clear selection state after adding
+    selectedBlockIds = [];
+    canAddReference = false;
+    window.getSelection()?.removeAllRanges(); // Clear visual selection in editor
   }
 
 </script>
@@ -379,6 +606,10 @@
     {/if}
   </div>
 
+  <!-- Reference Context Bar -->
+  <ReferenceContext />
+
+  <!-- Input Area -->
   <div class="input-area">
     <textarea 
       bind:value={userInput} 
@@ -388,6 +619,15 @@
       disabled={isLoading}
     ></textarea>
     <button on:click={sendMessage} disabled={!userInput.trim() || isLoading}>发送</button>
+    <!-- Add Reference Button -->
+    <button 
+      class="add-reference-button" 
+      title="添加当前选中文本作为引用" 
+      on:click={addSelectionReference} 
+      disabled={!canAddReference || isLoading}
+    >
+      引用选区
+    </button>
   </div>
 </div>
 
@@ -566,5 +806,10 @@
   }
   .message.ai :global(th) {
       background-color: #f2f2f2;
+  }
+
+  .add-reference-button {
+    margin-left: 5px;
+    background-color: var(--b3-theme-secondary); /* Different color */
   }
 </style> 
