@@ -345,6 +345,61 @@
       }
   }
 
+  // Function to execute block insertion via API
+  async function executeInsertBlock(previousId: string | null, markdownContent: string, parentId: string | null) {
+    console.log(`Attempting to insert block after ${previousId || 'start'} with parent ${parentId || 'unknown'}, content:\n${markdownContent}`);
+
+    // Construct the payload based on parameters
+    const payload: { dataType: string; data: string; previousID?: string; parentID?: string } = {
+      dataType: "markdown",
+      data: markdownContent, // Use 'data' instead of 'markdown'
+    };
+
+    if (previousId !== null) {
+      payload.previousID = previousId;
+    } else if (parentId !== null) {
+        // Only add parentID if previousID is explicitly null (or empty string which becomes null)
+        payload.parentID = parentId;
+        payload.previousID = ""; // Necessary when inserting at the beginning with parentID
+    } else {
+        // Default case: If both are null, behave as inserting at the start (should ideally have a docId as parent)
+        // This case might need more robust handling depending on context
+        payload.previousID = ""; 
+    }
+
+    try {
+      console.log("Executing insert with payload:", payload);
+      const response = await fetch('/api/block/insertBlock', {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`API Error (${response.status}): ${errorText}`);
+      }
+
+      const result = await response.json();
+      if (result.code !== 0) {
+        throw new Error(`API returned error code ${result.code}: ${result.msg}`);
+      }
+
+      console.log(`Block inserted successfully after ${previousId || 'start'}.`);
+      // Optionally, we could try to get the new block ID from the response if the API returns it
+      // result.data might contain info about the new block(s)
+      // For now, just log success
+
+    } catch (error) {
+      console.error("Error executing insert block command:", error);
+      errorMessage = `插入块失败: ${error.message}`;
+      // Rethrow or handle as needed
+      throw error; 
+    }
+  }
+
   // --- Utility function to add system messages (optional) ---
   // function addSystemMessage(text: string) {
   //     const sysId = Date.now().toString() + 'sys';
@@ -360,19 +415,90 @@
 
   // --- Message Sending Function ---
   async function sendMessage() {
-    if (!userInput.trim() || isLoading) return; // Prevent sending empty or during loading
+    const currentUserInput = userInput.trim();
+    if (!currentUserInput || isLoading) return; // Prevent sending empty or during loading
 
     errorMessage = '';
     isLoading = true;
     
+    // --- Frontend Command Handling for "[删除|修改]选区N" ---
+    const selectionCommandMatch = currentUserInput.match(/^(删除|修改)选区(\d+)$/i);
+    let commandHandledByFrontend = false;
+
+    if (selectionCommandMatch) {
+        const action = selectionCommandMatch[1];
+        const index = parseInt(selectionCommandMatch[2], 10);
+        console.log(`[Frontend Command] Matched: action=${action}, index=${index}`); // Log action and index
+
+        const currentReferences = get(referenceStore);
+        console.log('[Frontend Command] Current references in store:', JSON.stringify(currentReferences, null, 2)); // Log all refs
+
+        const selectionReferences = currentReferences.filter(ref => ref.type === 'selection');
+        console.log('[Frontend Command] Filtered selection references:', JSON.stringify(selectionReferences, null, 2)); // Log filtered refs
+
+        if (index > 0 && index <= selectionReferences.length) {
+            const targetReference = selectionReferences[index - 1]; // Adjust index to be 0-based
+            console.log(`[Frontend Command] Target reference (at index ${index - 1}):`, JSON.stringify(targetReference, null, 2)); // Log the specific target
+
+            const targetBlockIds = targetReference.blockIds;
+            console.log(`[Frontend Command] Target Block IDs for ${action}:`, JSON.stringify(targetBlockIds)); // Log IDs to be acted upon
+
+            if (action.toLowerCase() === '删除') {
+                try {
+                    // Call delete for each block in the reference
+                    for (const blockId of targetBlockIds) {
+                        await executeDeleteBlock(blockId);
+                    }
+                    // Add confirmation message
+                    const confirmId = Date.now().toString() + 'fe-del';
+                    messages.update(m => [...m, { id: confirmId, role: 'assistant', content: `已执行删除选区 ${index} (块: ${targetBlockIds.join(', ')}) 的操作。`, html: markdownToHtml(`已执行删除选区 **${index}** (块: ${targetBlockIds.join(', ')}) 的操作。`) }]);
+                    messages.set([...get(messages)]);
+                    
+                    // Clear ONLY the handled selection reference
+                    const handledRefId = targetReference.id;
+                    console.log(`[Frontend Command] Removing reference with ID: ${handledRefId}`); // Log ID being removed
+                    referenceStore.update(refs => {
+                        const updatedRefs = refs.filter(ref => ref.id !== handledRefId);
+                        console.log('[Frontend Command] References after removal:', JSON.stringify(updatedRefs, null, 2)); // Log store state after removal
+                        return updatedRefs;
+                    });
+                    commandHandledByFrontend = true;
+                } catch (error) {
+                    console.error("[Frontend Command] Error executing frontend delete command:", error);
+                    errorMessage = `执行删除选区 ${index} 失败: ${error.message}`;
+                    // Let the rest of the function handle the error state, but don't proceed to AI
+                    commandHandledByFrontend = true; // Still handled (failed)
+                }
+            } else if (action.toLowerCase() === '修改') {
+                // Modification logic is complex, add placeholder/message for now
+                console.log("Frontend modification command recognized, but not fully implemented.");
+                errorMessage = `通过 \"修改选区N\" 指令修改内容的功能尚未完全实现。请尝试选中内容后，直接向 AI 提出修改要求。`;
+                commandHandledByFrontend = true; // Prevent sending to AI
+            }
+        } else {
+            console.warn(`[Frontend Command] Invalid index ${index} for ${selectionReferences.length} selection references.`); // Log invalid index
+            errorMessage = `无效的选区编号: ${index}。请确保编号在 1 到 ${selectionReferences.length} 之间。`;
+            commandHandledByFrontend = true; // Prevent sending to AI
+        }
+    }
+
+    // --- If command was handled by frontend, reset input and stop here ---
+    if (commandHandledByFrontend) {
+        userInput = ''; // Clear input
+        isLoading = false; // Reset loading state
+        await tick();
+        scrollToBottom();
+        return; // Stop further processing
+    }
+
+    // --- Proceed with sending to AI if not handled by frontend ---
     const uniqueId = Date.now().toString() + Math.random().toString(36).substring(2, 9);
-    const userMessage: DisplayChatMessage = { id: uniqueId, role: 'user', content: userInput.trim() };
+    const userMessage: DisplayChatMessage = { id: uniqueId, role: 'user', content: currentUserInput };
     
     messages.update(currentMessages => [...currentMessages, userMessage]);
     messages.set([...get(messages)]); 
     console.log("User message added to store:", get(messages));
     
-    const currentUserInput = userInput.trim(); // Store user input before clearing
     userInput = '';
     await tick();
     scrollToBottom();
@@ -412,8 +538,11 @@
 
     // 3. Combine contexts for the API call
     let combinedContextForApi = '';
+    if (currentDocId) {
+      combinedContextForApi += `--- Document Root (ID: ${currentDocId}) ---\n\n`; // Add Doc ID first
+    }
     if (mainDocumentContext) {
-        combinedContextForApi += mainDocumentContext; // Already has header
+        combinedContextForApi += mainDocumentContext; // Then add child blocks
     }
     if (referencedContext) {
         if (combinedContextForApi) combinedContextForApi += "\n\n"; // Add separator
@@ -432,7 +561,7 @@
         }));
 
     // Modify system prompt to include context if available
-    let systemPrompt = `You are a helpful AI assistant integrated into Siyuan Note.\nYou can interact with the document content. \nWhen you need to modify the document based on the user's request, output **only** a JSON command block with the required action. \nUse the block IDs provided in the context.\n\nAvailable actions:\n1. To delete a block: \`\`\`json {"action": "delete", "block_id": "BLOCK_ID_TO_DELETE"} \`\`\`\n2. To update a block's content: \`\`\`json {"action": "update", "block_id": "BLOCK_ID_TO_UPDATE", "new_markdown": "NEW_MARKDOWN_CONTENT"} \`\`\`\n\nIf you are just answering a question or providing information, respond normally without the JSON block.`;
+    let systemPrompt = `You are a helpful AI assistant integrated into Siyuan Note.\\nYou can interact with the document content based on the provided context.\\n\\n**Understanding the Context:**\\nThe context below shows the structure and content of the current document or specific blocks selected by the user.\\nEach block is listed with its sequential number, unique ID, and type, like this:\\n--- Block N (ID: yyyy-mmdd-xxxxxx, Type: p) ---\\n[Markdown content of the block]\\n---\\n+(Referenced blocks, if any, will be listed under \\"Referenced content:\\")\\n\\n**Performing Actions (Delete/Update):**\\nWhen the user asks you to modify the document (e.g., \\"delete the second paragraph\\\", \\"update the list item with ID xxx\\\"):\\n1. Carefully identify the **exact block ID** (e.g., yyyy-mmdd-xxxxxx) from the context that corresponds to the user\\'s request.\\n2. Output **only** a single JSON command block using one of the following formats. **You MUST use the specific block ID found in the context.**\\n\\n   *   To delete a block: \\\`\\\`\\\`json {\\\"action\\\": \\\"delete\\\", \\\"block_id\\\": \\\"TARGET_BLOCK_ID_FROM_CONTEXT\\\"} \\\`\\\`\\\`\\\n   *   To update a block: \\\`\\\`\\\`json {\\\"action\\\": \\\"update\\\", \\\"block_id\\\": \\\"TARGET_BLOCK_ID_FROM_CONTEXT\\\", \\\"new_markdown\\\": \\\"NEW_MARKDOWN_CONTENT\\\"} \\\`\\\`\\\`\\\n   *   To insert a block: \\\`\\\`\\\`json {\\\"action\\\": \\\"insert\\\", \\\"previousID\\\": \\\"ID_OF_BLOCK_BEFORE\\\", \\\"parentID\\\": null, \\\"markdown\\\": \\\"NEW_MARKDOWN_CONTENT\\\"} \\\`\\\`\\\` (Note: parentID is usually null for insertions relative to existing blocks)\\\n\\n**IMPORTANT RULES:**\\n*   **Action Intent:** Determine the user\\\'s core goal:\\\n    *   \\'update\\': User wants to *modify, update, or replace* content of an *existing* block.\\\n    *   \\'delete\\': User wants to *remove or delete* an *existing* block.\\\n    *   \\'insert\\': User wants to *add, insert, create, or write* *new* content/blocks.\\\n    *   **If unsure about intent, ASK the user.**\\\n*   **Insert Command - How to Set IDs (ONLY relative to specific Block IDs):**\\\n    *   **Goal: Insert AFTER Block A?** (e.g., \\"add below Block A\\\", \\"insert after selection 1\\\")\\\n        *   Find Block A\\\'s ID in the context (\\'BLOCK_A_ID\\').\\\n        *   Set \\'previousID\\' = \\'BLOCK_A_ID\\'.\\\n        *   Set \\'parentID\\' = null (or omit).\\\n    *   **Goal: Insert BEFORE Block B?** (e.g., \\"insert before Block B\\\", \\"add above selection 1\\\")\\\n        *   Find the ID of the block *immediately preceding* Block B in the context (\\'BLOCK_B_minus_1_ID\\'). **There MUST be a preceding block.**\\\n        *   Set \\'previousID\\' = \\'BLOCK_B_minus_1_ID\\'.\\\n        *   Set \\'parentID\\' = null (or omit).\\\n    *   **Goal: Insert BETWEEN Block A and Block B?** (e.g., \\"put this between block 1 and 2\\\")\\\n        *   Treat this as \\"Insert AFTER Block A\\\".\\\n        *   Find Block A\\\'s ID (\\'BLOCK_A_ID\\').\\\n        *   Set \\'previousID\\' = \\'BLOCK_A_ID\\'.\\\n        *   Set \\'parentID\\' = null (or omit).\\\n    *   **Content:** The \\'markdown\\' field must contain the complete Markdown content for the new block(s).\\\n*   **NO Fuzzy Locations:** Requests like \\"insert at the beginning\\\", \\"insert at the end\\\", or \\"insert here\\\" are **NOT SUPPORTED** for direct action. See \\"Ask If Unsure\\\".\\\n*   **Referenced Context First:** If \\\'Referenced content\\\' is provided and the user\\\'s request mentions the selection/reference (e.g., \\"update selection 1\\\", \\"insert after the selected paragraph\\\"), **MUST** use the block ID from the \\\'Referenced content\\\' section for targeting (\\\'block_id\\\' for update/delete, \\\'previousID\\' for insert after). Only use IDs from the main document context if the user explicitly targets other parts.\\\n*   **Use Exact IDs:** Always use the exact block IDs shown in parentheses (ID: ...) from the context. Never guess IDs or use block numbers like \\"Block 3\\\".\\\n*   **Ask If Unsure (CRITICAL):** If the user\\\'s request is ambiguous about the action (update/delete/insert), the target block/location, or if you cannot confidently find the necessary IDs in the context according to these rules, **you MUST ask the user for clarification**. \\\n    *   **Specifically:** If the user asks to insert at the beginning, end, or uses vague terms without specifying a block ID, you MUST reply asking them to provide the **ID of the block** they want to insert **before** or **after**.\\\n    *   Example clarifying question: \\\"To insert the content, please tell me the ID of the block you want to insert it before or after.\\\"\\\n    *   Do NOT guess or make assumptions.\\\n*   **Normal Chat:** For general questions, summaries, or explanations that don\\\'t involve changing the document, respond normally in natural language without any JSON command block.\\\n\\\n--- Context Starts Below:`; // The actual context will be appended later
 
     if (combinedContextForApi) { // Check the combined context
         // Use the new structured context string
@@ -473,8 +602,21 @@
                     const confirmId = Date.now().toString() + 'cmd-upd';
                     messages.update(m => [...m, { id: confirmId, role: 'assistant', content: `已执行更新块 ${command.block_id} 的操作。`, html: markdownToHtml(`已执行更新块 **${command.block_id}** 的操作。`) }]);
                     messages.set([...get(messages)]);
+                } else if (command.action === 'insert' && typeof command.markdown === 'string' && (
+                    (typeof command.previousID === 'string') || // previousID can be empty string or an ID
+                    (typeof command.parentID === 'string' && command.parentID !== '') // parentID must be a non-empty string if used
+                    )) {
+                        const previousId = command.previousID === "" ? null : command.previousID; // Handle empty string case
+                        const parentId = command.parentID || null; // Use null if undefined or empty
+                        await executeInsertBlock(previousId, command.markdown, parentId);
+                        commandExecuted = true;
+                        // Add confirmation message
+                        const confirmId = Date.now().toString() + 'cmd-ins';
+                        const locationDesc = previousId ? `块 ${previousId} 之后` : (parentId ? `文档 ${parentId} 开头` : '文档开头'); // Adjusted description for parentID
+                        messages.update(m => [...m, { id: confirmId, role: 'assistant', content: `已在 ${locationDesc} 插入新块。`, html: markdownToHtml(`已在 **${locationDesc}** 插入新块。`) }]);
+                        messages.set([...get(messages)]);
                 } else {
-                    console.warn("Parsed command JSON has invalid action or missing parameters:", command);
+                    console.warn("Parsed command JSON has invalid action or missing/invalid parameters:", command);
                     // Fall through to display the raw response if command is invalid
                 }
             } catch (parseError) {
@@ -516,9 +658,9 @@
         console.log("Error message added to store:", get(messages)); // Log after update
     } finally {
         isLoading = false;
-        // Clear selection references AFTER the API call attempt
-        if (selectionReferences.length > 0) {
-            console.log("Clearing selection references.");
+        // Clear selection references AFTER the API call attempt ONLY IF NOT handled by frontend
+        if (!commandHandledByFrontend && selectionReferences.length > 0) { 
+            console.log("Clearing selection references after AI call.");
             referenceStore.update(refs => refs.filter(ref => ref.type !== 'selection'));
         }
         await tick(); // Wait for UI update before scrolling
