@@ -4,10 +4,11 @@
   // 从 props 接收插件实例或特定函数和当前设置
   export let loadSettings: () => Promise<any>; 
   export let saveSettings: (data: any) => Promise<void>;
-  export let currentSettings: { apiUrl: string; apiKey: string };
+  export let currentSettings: { apiUrl: string; apiKey: string; modelName: string };
 
   let apiUrl = '';
   let apiKey = '';
+  let modelName = '';
   let statusMessage = ''; // 用于显示保存状态
 
   // 组件挂载时加载设置
@@ -15,18 +16,20 @@
     if (currentSettings) {
       apiUrl = currentSettings.apiUrl || '';
       apiKey = currentSettings.apiKey || '';
+      modelName = currentSettings.modelName || 'deepseek-chat';
     } else {
       // 如果没有从 props 接收到，尝试自己加载（作为备用）
       const loaded = await loadSettings();
       apiUrl = loaded.apiUrl || '';
       apiKey = loaded.apiKey || '';
+      modelName = loaded.modelName || 'deepseek-chat';
     }
   });
 
   // 保存设置函数
   async function handleSave() {
     try {
-      await saveSettings({ apiUrl, apiKey });
+      await saveSettings({ apiUrl, apiKey, modelName });
       statusMessage = '设置已保存！';
       setTimeout(() => statusMessage = '', 3000); // 3秒后清除消息
     } catch (error) {
@@ -60,6 +63,18 @@
       class="b3-text-field"
     />
      <p class="description">您的 API Key 将被保存在本地配置文件中。</p>
+  </div>
+
+  <div class="form-item">
+    <label for="model-name">模型名称:</label>
+    <input 
+      id="model-name" 
+      type="text" 
+      bind:value={modelName} 
+      placeholder="例如: deepseek-chat, gpt-4o, ..."
+      class="b3-text-field"
+    />
+    <p class="description">请输入要调用的具体模型名称。</p>
   </div>
 
   <div class="actions">
