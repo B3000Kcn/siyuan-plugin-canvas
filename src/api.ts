@@ -193,17 +193,6 @@ export async function appendBlock(dataType: DataType, data: string, parentID: Bl
 }
 
 
-export async function updateBlock(dataType: DataType, data: string, id: BlockId): Promise<IResdoOperations[]> {
-    let payload = {
-        dataType: dataType,
-        data: data,
-        id: id
-    }
-    let url = '/api/block/updateBlock';
-    return request(url, payload);
-}
-
-
 export async function deleteBlock(id: BlockId): Promise<IResdoOperations[]> {
     let data = {
         id: id

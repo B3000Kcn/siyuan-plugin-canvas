@@ -43,7 +43,7 @@ coverage/
 *.swp
 
 # Specific project folders/files to ignore
-dist_bak/
+dist-bak/
 dev/
 .specstory/
 index.css
@@ -56,5 +56,14 @@ package.zip
 
 pnpm-lock.yaml
 package-lock.json
-思源笔记画布插件-项目计划.md
-AI 助手插件开发备忘录.md
+
+plan.md
+note.md
+
+AIChatPanel.svelte.bak
+
+prompt_show.md
+
+README_zh_CN.md
+
+CHANGELOG.md

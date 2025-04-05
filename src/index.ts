@@ -1,10 +1,12 @@
 import { Plugin, getFrontend, Dialog } from "siyuan";
 import AIChatPanel from "./components/AIChatPanel.svelte";
 import SettingsPanel from "./components/SettingsPanel.svelte";
-import { settingsStore, conversationsStore, currentDocumentIdStore, currentDocumentPathStore, type AppSettings, type SavedConversation } from "./stores";
+import { settingsStore, conversationsStore, currentDocumentIdStore, currentDocumentPathStore, type AppSettings, type SavedConversation, type DisplayChatMessage } from "./stores";
+import { get } from "svelte/store";
 
 const SETTINGS_STORAGE_NAME = "ai-assistant-config";
 const CONVERSATIONS_STORAGE_NAME = "ai-assistant-conversations";
+const ACTIVE_CONVERSATION_KEY = 'activeUnsavedConversation';
 const DEFAULT_SETTINGS: AppSettings = {
     apiUrl: "",
     apiKey: "",
@@ -19,6 +21,7 @@ export default class PluginSample extends Plugin {
     private isMobile: boolean; // 保留 isMobile，因为 Dock 标题里用到了
     private settings: AppSettings; // 用于存储当前设置
     private settingsDialog: Dialog | null = null; // 用于跟踪设置对话框
+    private conversationsUnsubscribe: () => void;
 
     // 新增 switch-protyle 的回调引用
     private switchProtyleCallback = this.handleSwitchProtyle.bind(this);
@@ -33,6 +36,20 @@ export default class PluginSample extends Plugin {
         await this.loadSettings();
         // 加载历史对话
         await this.loadConversations();
+        const initialActiveMessages: DisplayChatMessage[] | null = await this.loadData(ACTIVE_CONVERSATION_KEY);
+        console.log(`[Index.onload] Loaded initial active messages from ${ACTIVE_CONVERSATION_KEY}:`, JSON.stringify(initialActiveMessages)); // Log the actual data
+
+        this.conversationsUnsubscribe = conversationsStore.subscribe(async (conversations) => {
+            if (!conversations || conversations.length === 0 && initialActiveMessages) {
+                // Simple check: Don't save if the store is empty right after potentially loading active messages
+                // console.log("[Index.storeSubscribe] Skipping initial save of empty conversations list.");
+                // return;
+            }
+            await this.saveData(CONVERSATIONS_STORAGE_NAME, conversations);
+            // Reduce log noise, maybe only log on error or less frequently
+            // console.log(`Auto-saved conversations list (${conversations.length} total) due to store change.`);
+        });
+        console.log("Subscribed to conversationsStore for auto-saving.");
 
         // 新增：监听 'switch-protyle' 事件
         this.eventBus.on("switch-protyle", this.switchProtyleCallback);
@@ -56,12 +73,21 @@ export default class PluginSample extends Plugin {
             },
             data: {
                 plugin: this,
+                saveData: this.saveData.bind(this),
+                loadData: this.loadData.bind(this),
+                initialActiveMessages: initialActiveMessages,
                 saveConversations: this.saveConversations.bind(this)
             },
             type: AI_ASSISTANT_DOCK_TYPE, 
             init(dock: any) { 
-                new AIChatPanel({ target: dock.element, props: { pluginData: dock.data } });
-                console.log("AI Assistant Dock initialized with Svelte component");
+                new AIChatPanel({ 
+                    target: dock.element, 
+                    props: {
+                        pluginData: dock.data, 
+                        initialActiveMessages: dock.data.initialActiveMessages 
+                    }
+                });
+                console.log("AI Assistant Dock initialized with Svelte component and required data.");
             },
             destroy() {
                 console.log("AI Assistant Dock destroyed");
@@ -209,7 +235,7 @@ export default class PluginSample extends Plugin {
     private async saveConversations(conversations: SavedConversation[]) {
         await this.saveData(CONVERSATIONS_STORAGE_NAME, conversations);
         conversationsStore.set(conversations); // 确保 store 同步
-        console.log(`Conversations saved (${conversations.length} total).`);
+        console.log(`Conversations saved via explicit call (${conversations.length} total).`);
     }
 
     onunload() {
@@ -217,7 +243,10 @@ export default class PluginSample extends Plugin {
         // 移除 'switch-protyle' 监听器
         this.eventBus.off("switch-protyle", this.switchProtyleCallback);
         console.log("Event listener for 'switch-protyle' removed.");
-         // 注意：简单监听器未移除，但这通常没关系，因为插件卸载时会清理
+        if (this.conversationsUnsubscribe) {
+            this.conversationsUnsubscribe();
+            console.log("Unsubscribed from conversationsStore.");
+        }
         if (this.settingsDialog) {
             this.settingsDialog.destroy();
         }

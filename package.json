@@ -1,12 +1,12 @@
 {
   "name": "siyuan-plugin-canvas",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Integrates an AI assistant into SiYuan Notes for intelligent note operations.",
-  "repository": "https://github.com/YOUR_GITHUB_USERNAME/siyuan-plugin-canvas",
-  "homepage": "https://github.com/YOUR_GITHUB_USERNAME/siyuan-plugin-canvas",
-  "author": "YOUR_GITHUB_USERNAME",
-  "license": "MIT",
+  "repository": "https://github.com/B3000Kcn/siyuan-plugin-canvas",
+  "homepage": "https://github.com/B3000Kcn/siyuan-plugin-canvas",
+  "author": "B3000Kcn",
+  "license": "Apache-2.0",
   "scripts": {
     "dev": "cross-env NODE_ENV=development VITE_SOURCEMAP=inline vite build --watch",
     "build": "cross-env NODE_ENV=production vite build",

@@ -6,14 +6,20 @@
   import { markdownToHtml } from '../utils/markdown'; // 引入 markdown 转换函数
   import { writable, get } from 'svelte/store'; // 引入 get
   import ReferenceContext from './ReferenceContext.svelte'; // <-- 导入引用栏组件
-  // import { fetchSyncPost } from 'siyuan'; // Import fetchSyncPost for SQL query
 
   // Define constants
   const MAX_HISTORY_MESSAGES = 20; // Maximum number of messages (user + assistant) to keep in history for context
-  const STORAGE_KEY_MESSAGES = 'aiAssistantMessages';
+  const ACTIVE_CONVERSATION_KEY = 'activeUnsavedConversation'; // Key for persisting active chat
+  const SAVE_ACTIVE_DEBOUNCE_MS = 1500; // Debounce time for saving active chat
 
   // --- Props --- 
-  export let pluginData: { saveConversations: (conversations: SavedConversation[]) => Promise<void> };
+  export let pluginData: {
+      saveConversations: (conversations: SavedConversation[]) => Promise<void>;
+      // Assume these are provided by index.ts via Siyuan's API
+      saveData: (key: string, data: any) => Promise<void>; 
+      loadData: (key: string) => Promise<any>; 
+  };
+  export let initialActiveMessages: DisplayChatMessage[] | null = null; // Messages loaded from storage by index.ts
 
   // 消息类型定义
   interface ChatMessage {
@@ -46,6 +52,13 @@
   let canAddReference = false; // Control the state of the Add Reference button
   let debounceTimeout: number | null = null; // <-- Add debounce timer variable
   let showHistory = false; // Control visibility of history list
+  let debounceSaveActiveTimeout: number | null = null; // Timer for debouncing active state save
+
+  // --- State for Custom Context Menu ---
+  let showContextMenu = false;
+  let contextMenuTop = 0;
+  let contextMenuLeft = 0;
+  let contextTargetMessageId: string | null = null;
 
   // 订阅 store
   const settingsUnsubscribe = settingsStore.subscribe(value => {
@@ -70,16 +83,30 @@
 
   // Component mounted
   onMount(async () => {
-      // Add initial assistant message
-      const initialText = '有什么可以帮您？';
-      messages.set([{ 
-          id: Date.now().toString() + 'init', // Give it an ID
-          role: 'assistant', 
-          content: initialText, 
-          html: markdownToHtml(initialText) 
-      }]);
+      console.log("[onMount] Component mounted. Initial active messages prop:", JSON.stringify(initialActiveMessages)); // Log received prop data
+      if (initialActiveMessages && initialActiveMessages.length > 1) { // Check length > 1 to avoid just initial prompt
+          console.log("[onMount] Loading persisted active conversation state.");
+          // Ensure messages have HTML rendered if they are assistant messages
+          messages.set(initialActiveMessages.map(msg => ({
+              ...msg,
+              html: msg.role === 'assistant' ? markdownToHtml(msg.content) : undefined
+          })));
+          currentConversationId = null; // Explicitly mark as unsaved active conversation
+          nextId = initialActiveMessages.length; // Adjust nextId if needed
+      } else {
+          console.log("[onMount] No persisted active state found or invalid, starting fresh.");
+          // Add initial assistant message if no active state loaded
+          const initialText = '有什么可以帮您？';
+          messages.set([{ 
+              id: Date.now().toString() + 'init', // Give it an ID
+              role: 'assistant', 
+              content: initialText, 
+              html: markdownToHtml(initialText) 
+          }]);
+          currentConversationId = null;
+      }
       
-      loadConversationsFromStorage(); // Placeholder
+      // loadConversationsFromStorage(); // This loads the SAVED list, keep it
       await tick(); // Wait for initial message render
       scrollToBottom();
 
@@ -88,21 +115,53 @@
   });
 
   onDestroy(() => {
+      // Cancel any pending debounced save
+      if (debounceSaveActiveTimeout) {
+          clearTimeout(debounceSaveActiveTimeout);
+          console.log('[onDestroy] Cleared pending debounced active state save.');
+      }
+      // Attempt one final save of the active state synchronously (or as close as possible)
+      if (currentConversationId === null && get(messages).length > 1) {
+          console.log('[onDestroy] Attempting final save of active conversation state...');
+          const finalMessages = get(messages);
+          console.log(`[onDestroy] Final save data (${finalMessages.length} messages):`, JSON.stringify(finalMessages)); // Log final data
+          // Note: Await might not fully complete on hard exit, but it's the best effort
+          pluginData.saveData(ACTIVE_CONVERSATION_KEY, finalMessages)
+              .then(() => console.log('[onDestroy] Final active state save attempt finished.')) // Log completion
+              .catch(err => console.error('[onDestroy] Error during final active state save:', err));
+      } else {
+          // If it's a saved conversation or empty, ensure the active state is cleared
+          console.log('[onDestroy] Clearing active conversation state as it was saved or empty.');
+          pluginData.saveData(ACTIVE_CONVERSATION_KEY, null)
+               .catch(err => console.error('[onDestroy] Error clearing active state on destroy:', err));
+      }
+
+      // --- Auto-save current unsaved conversation on destroy ---
+      if (!currentConversationId && get(messages).length > 1) {
+          console.log('[onDestroy] Auto-saving current unsaved conversation...');
+          // Note: saveCurrentConversation is async, completion not guaranteed on hard exit,
+          // but Siyuan's plugin lifecycle might handle data saving gracefully.
+          saveCurrentConversation(); 
+      }
+      // --- End auto-save ---
+
       settingsUnsubscribe(); // 取消订阅
       conversationsUnsubscribe();
       currentDocIdUnsubscribe(); // <-- 取消订阅文档 ID
       currentDocPathUnsubscribe();
       // Remove event listener
       document.removeEventListener('selectionchange', handleSelectionChange);
+      hideContextMenu(); // Hide context menu on component destruction
   });
 
   // --- 对话管理函数 --- 
   // 开始新对话
   async function newConversation() {
-      if (get(messages).length > 1 && !currentConversationId && !isLoading) {
-          console.log("Auto-saving previous conversation...");
-          await saveCurrentConversation();
-      }
+      // Save previous *named* conversation if needed (existing logic?)
+      // We don't need to auto-save the *unsaved* one here anymore, 
+      // as the reactive block handles ongoing saves, and onDestroy handles the exit.
+      
+      console.log("[newConversation] Starting new conversation.");
       const initialText = '新对话已开始，有什么可以帮您？';
       const initialHtml = markdownToHtml(initialText); 
       messages.set([{
@@ -113,46 +172,93 @@
       }]);
       currentConversationId = null;
       userInput = '';
+      
+      await clearActiveConversationState(); // Clear the persisted active state
+      
+      // **** Explicitly reset loading state ****
+      isLoading = false; 
+      errorMessage = ''; // Also clear any lingering error message
+      canAddReference = false; // Reset reference button state
+      console.log("[newConversation] Reset isLoading to false.");
+      
       await tick(); 
       scrollToBottom(); 
   }
 
   // 保存当前对话
   async function saveCurrentConversation() {
-      if (isLoading || get(messages).length <= 1 || currentConversationId) return; 
+      if (isLoading || get(messages).length <= 1 || currentConversationId) {
+          console.log("[saveCurrent] Conditions not met (loading, empty, or already saved). Skipping.");
+          return; 
+      }
+      console.log("[saveCurrent] Saving current conversation...");
       const timestamp = Date.now();
       const newId = timestamp.toString();
-      const name = `对话 ${new Date(timestamp).toLocaleString()}`;
+      const name = `对话 ${new Date(timestamp).toLocaleString()}`; // Use let if you modify name later
       const conversationToSave: SavedConversation = {
           id: newId,
           name: name,
           timestamp: timestamp,
-          // 只保存原始消息结构 (id, sender, text)
+          // Store only role/content for saved conversations
           messages: get(messages)
-              .filter(m => m.role === 'user' || m.role === 'assistant')
+              .filter(m => m.role === 'user' || m.role === 'assistant') // Exclude system/error?
               .map(({ role, content }) => ({ role, content }))
       };
-      const updatedConversations = [conversationToSave, ...savedConversations];
-      await pluginData.saveConversations(updatedConversations); 
-      currentConversationId = newId; 
-      console.log("Conversation saved with ID:", newId);
+      // Prepend to the list managed by the store
+      conversationsStore.update(list => [conversationToSave, ...list.sort((a, b) => b.timestamp - a.timestamp)]);
+      // The store's subscription in index.ts should handle the actual saving to storage
+
+      currentConversationId = newId; // Mark as saved
+      
+      await clearActiveConversationState(); // Clear the persisted active state now that it's saved
+      
+      console.log("[saveCurrent] Conversation saved with ID:", newId, "and active state cleared.");
   }
 
   // 加载指定 ID 的对话
-  function loadConversation(id: string) {
-      const conversationToLoad = savedConversations.find(c => c.id === id);
+  async function loadConversation(id: string) { // <-- Make async
+      // **** NEW: Auto-save current unsaved conversation before loading history ****
+      if (currentConversationId === null && get(messages).length > 1 && !isLoading) { 
+          console.log("[loadConversation] Current conversation is unsaved. Auto-saving before loading...");
+          try {
+              await saveCurrentConversation(); // Save the current one first
+              console.log("[loadConversation] Auto-save successful.");
+          } catch (error) {
+              console.error("[loadConversation] Error auto-saving current conversation:", error);
+              // Optional: Decide if you want to stop loading if auto-save fails?
+              // For now, we'll continue loading even if save fails.
+              errorMessage = "自动保存当前对话失败，但仍将尝试加载历史对话。";
+          }
+      }
+      // **** END NEW ****
+
+      const conversationToLoad = get(conversationsStore).find(c => c.id === id);
       if (conversationToLoad) {
-          messages.update(currentMessages => conversationToLoad.messages.map((msg, index) => ({
+          console.log("[loadConversation] Loading conversation:", id);
+          messages.set(conversationToLoad.messages.map((msg, index) => ({
               ...msg,
-              id: index, // 重新生成 ID
-              // 为 AI 消息生成 HTML
+              id: `${id}-${index}`, // Generate unique ID based on conv ID and index
               html: msg.role === 'assistant' ? markdownToHtml(msg.content) : undefined
           })));
           currentConversationId = conversationToLoad.id;
           nextId = get(messages).length;
           userInput = '';
+          
+          clearActiveConversationState(); // Clear active state as we loaded a saved one
+          
           tick().then(scrollToBottom);
-          console.log("Conversation loaded:", id);
+          console.log("[loadConversation] Conversation loaded, active state cleared.");
+          
+          // **** Explicitly reset loading state AFTER loading ****
+          isLoading = false; 
+          errorMessage = ''; // Clear errors
+          canAddReference = false; // Reset reference button
+          console.log("[loadConversation] Reset isLoading to false after load.");
+      } else {
+          console.error("[loadConversation] Conversation with ID not found:", id);
+          // Reset loading state even if load fails
+          isLoading = false; 
+          errorMessage = `加载对话失败：未找到 ID ${id}`;
       }
   }
 
@@ -171,59 +277,199 @@
   }
 
   // --- Helper function to fetch structured document context ---
-  async function getStructuredDocumentContext(docId: string): Promise<string> {
+  async function getStructuredDocumentContext(docId: string): Promise<string | null> {
     if (!docId) {
-      console.log("No docId provided for structured context fetch.");
-      return "";
+        console.warn("getStructuredDocumentContext called with no docId.");
+        return null;
     }
-    console.log(`Fetching structured context for document ID: ${docId}`);
+
+    console.log(`Attempting to get visual structure using /api/filetree/getDoc for ID: ${docId}`);
+
     try {
-      const sqlQuery = `SELECT id, type, markdown FROM blocks WHERE parent_id = '${docId}' ORDER BY sort ASC`; 
-      const response = await fetch('/api/query/sql', {
+        const response = await fetch('/api/filetree/getDoc', {
           method: 'POST',
           headers: {
               'Content-Type': 'application/json',
-              // Include Authorization header if needed, check Siyuan API requirements
-              // 'Authorization': `Token YOUR_API_TOKEN_IF_NEEDED` 
           },
-          body: JSON.stringify({ stmt: sqlQuery }),
+            body: JSON.stringify({ id: docId /* Add other potential params if needed based on docs/observation */ })
       });
 
       if (!response.ok) {
+            console.error(`Error fetching /api/filetree/getDoc: ${response.status} ${response.statusText}`);
         const errorText = await response.text();
-        throw new Error(`SQL query failed with status ${response.status}: ${errorText}`);
+            console.error("Error response body:", errorText);
+            return null;
       }
 
       const result = await response.json();
 
-      if (result.code !== 0) {
-          throw new Error(`API returned error code ${result.code}: ${result.msg}`);
-      }
-      
-      // Log the raw data for debugging
-      console.log("Raw SQL query result data:", result.data);
+        // --- CRITICAL DEBUGGING STEP ---
+        console.log("DEBUG: Full response data from /api/filetree/getDoc:");
+        console.dir(result.data, { depth: null }); // Use console.dir for better object inspection
+        // --- END DEBUGGING STEP ---
 
-      if (!result.data || !Array.isArray(result.data)) {
-          console.log("No block data returned from SQL query or data is not an array.");
-          return "Document is empty or contains no text blocks."; // Or return empty string
-      }
+        if (!result || result.code !== 0 || !result.data) {
+            console.error("API call /api/filetree/getDoc did not return successful data:", result);
+            return null;
+        }
 
-      // Format the blocks into a string, including type
-      let formattedContext = "Current document context (Blocks ordered by position):\n";
-      result.data.forEach((block: { id: string; type: string; markdown: string }, index: number) => {
-          // Include block type in the formatted string
-          formattedContext += `--- Block ${index + 1} (ID: ${block.id}, Type: ${block.type}) ---\n${block.markdown || '[Block content not directly in markdown field]'}\n\n`; 
-      });
-      formattedContext += "--- End of Blocks ---";
-      
-      console.log("Formatted structured context length:", formattedContext.length);
-      return formattedContext;
+        // --- Step 1: Parse the HTML content ---
+        const htmlContent = result.data.content;
+        if (!htmlContent || typeof htmlContent !== 'string') {
+            console.error("/api/filetree/getDoc response data.content is missing or not a string.");
+            return null;
+        }
+
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(htmlContent, 'text/html');
+        const body = doc.body;
+
+        // --- Step 2: Extract visually ordered IDs and depths ---
+        const visualBlockInfos: { id: string, depth: number }[] = [];
+
+        function traverseNodes(element: Element, currentDepth: number) {
+            // Iterate over direct children that are block elements
+            for (const child of Array.from(element.children)) {
+                const nodeId = child.getAttribute('data-node-id');
+                
+                // Check if it's a block element we care about (adjust if needed)
+                if (nodeId && child.tagName === 'DIV' && child.hasAttribute('data-type')) {
+                    visualBlockInfos.push({ id: nodeId, depth: currentDepth });
+                    
+                    // Check for nested blocks within this block (e.g., inside list items)
+                    // We might need a more robust way to find the actual content container within complex blocks
+                    // For simplicity now, just recurse directly on the child element
+                    traverseNodes(child, currentDepth + 1);
+                } 
+                // else if it's not a direct block but might contain blocks (like the root body)
+                // or if we need to handle specific container types differently (like lists `li`)
+                // We might need more complex logic here depending on HTML structure variance.
+                // For now, handle direct children first.
+            }
+        }
+
+        // Start traversal from the immediate children of the parsed body
+        // Assuming the top-level blocks are direct children of the body in the parsed fragment
+        traverseNodes(body, 1); // Start depth at 1 for the first level of blocks
+
+        // --- CRITICAL DEBUGGING STEP ---
+        console.log("DEBUG: Extracted visual block info (ID and Depth):");
+        console.table(visualBlockInfos);
+        // --- END DEBUGGING STEP ---
+
+        if (visualBlockInfos.length === 0) {
+            console.warn("No block IDs extracted from the parsed HTML.");
+            return "[Context Generation Failed: Could not extract block info from HTML]";
+        }
+
+        // --- Step 3: Fetch content for the extracted IDs ---
+        const idsToFetch = visualBlockInfos.map(info => info.id);
+        let blocksData: { [id: string]: { markdown: string, type: string } } = {};
+
+        if (idsToFetch.length > 0) {
+            try {
+                const quotedIds = idsToFetch.map(id => `'${id}'`).join(', ');
+                const sqlQuery = `SELECT id, markdown, type FROM blocks WHERE id IN (${quotedIds})`;
+                console.log(`Executing SQL to fetch block content: ${sqlQuery}`);
+
+                const contentResponse = await fetch('/api/query/sql', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ stmt: sqlQuery }),
+                });
+
+                if (!contentResponse.ok) {
+                    const errorText = await contentResponse.text();
+                    throw new Error(`SQL query for content failed (${contentResponse.status}): ${errorText}`);
+                }
+
+                const contentResult = await contentResponse.json();
+                if (contentResult.code !== 0) {
+                    throw new Error(`API returned error code ${contentResult.code}: ${contentResult.msg}`);
+                }
+
+                // Create a map for easy lookup
+                if (contentResult.data && Array.isArray(contentResult.data)) {
+                    contentResult.data.forEach((block: { id: string; markdown: string; type: string }) => {
+                        blocksData[block.id] = { markdown: block.markdown || '', type: block.type || 'unknown' };
+                    });
+                }
+                 console.log("Fetched block content data map:", blocksData);
+
+            } catch (fetchError) {
+                console.error("Error fetching block content:", fetchError);
+                // Proceeding with placeholders for content if fetch fails
+                errorMessage = `获取块内容时出错: ${fetchError.message}`; 
+            }
+        }
+
+        // --- Step 4: Combine visual order/depth with fetched content ---
+        const finalOrderedBlocks = visualBlockInfos.map(info => {
+            const data = blocksData[info.id] || { markdown: `[Content Fetch Failed for ${info.id}]`, type: '[fetch failed]' };
+            return {
+                id: info.id,
+                markdown: data.markdown, 
+                type: data.type, 
+                depth: info.depth
+            };
+        }); 
+
+        // --- Step 5: Format --- 
+        const formattedContext = formatBlocksForAI(finalOrderedBlocks);
+        console.log("Formatted context using visual order (placeholder content):", formattedContext.substring(0, 500) + "...");
+        return formattedContext; // Return context with placeholder content for now
 
     } catch (error) {
-        console.error("Error fetching or processing structured document context:", error);
-        // Decide how to handle error: return empty string, specific error message, or re-throw?
-        return `Error retrieving document structure: ${error.message}`; 
+        console.error("Error in getStructuredDocumentContext processing /api/filetree/getDoc response:", error);
+        return null;
     }
+  }
+
+  // 新增：格式化块数据供 AI 使用 (重构为 map/join)
+  function formatBlocksForAI(blocks: any[]): string {
+      // DEBUG: Log the blocks array AS RECEIVED by this function
+      console.log("DEBUG: Blocks received by formatBlocksForAI (after deep copy):");
+      console.table(blocks); // Use table for better readability of order
+
+      // Filter out root block (depth 0) if necessary
+      const contentBlocks = blocks.filter(block => block.depth > 0);
+
+      if (contentBlocks.length === 0) {
+          console.log("No content blocks (depth > 0) found after filtering.");
+          return "Current Document Context (Structured with IDs and Hierarchy):\n[No content blocks found]\n--- End of Document Context ---";
+      }
+
+      const formattedLines = contentBlocks.map(block => {
+          const indent = '  '.repeat(block.depth - 1);
+          let blockContent = '';
+          // 优先列表项(i)的 content, 其他优先 markdown
+          if (block.type === 'i' && block.content) { 
+             blockContent = block.content;
+          } else {
+             blockContent = block.markdown || block.content || '';
+          }
+          // 移除末尾空白
+          const cleanedContent = blockContent.replace(/\s*$/, ''); 
+
+          let blockString = `${indent}--- Block (ID: ${block.id}, Type: ${block.type}) ---\n`;
+          if (cleanedContent) {
+            // 将内容按行分割并添加缩进
+            blockString += cleanedContent.split('\n').map(line => `${indent}${line}`).join('\n') + '\n';
+          } else {
+             blockString += `${indent}[Empty Block Content]\n`;
+          }
+          return blockString;
+      });
+
+      let formattedContext = "Current Document Context (Structured with IDs and Hierarchy):\n";
+      formattedContext += formattedLines.join(''); // 直接连接所有块字符串
+      formattedContext += "--- End of Document Context ---";
+
+      // DEBUG: Log the final formatted string just before returning
+      console.log("DEBUG: Formatted context string JUST BEFORE RETURN from formatBlocksForAI (using map/join):");
+      console.log(formattedContext.substring(0, 500) + "..."); // Log truncated
+
+      return formattedContext;
   }
 
   // --- Helper function to fetch context for SPECIFIC block IDs ---
@@ -312,38 +558,6 @@
       } catch (error) {
           console.error(`Error executing deleteBlock for ${blockId}:`, error);
           errorMessage = `删除块 ${blockId} 失败: ${error.message}`;
-          throw error; // Re-throw to be caught by sendMessage
-      }
-  }
-
-  async function executeUpdateBlock(blockId: string, newMarkdown: string): Promise<void> {
-      console.log(`Attempting to update block ${blockId} with new markdown:`, newMarkdown);
-      try {
-          const response = await fetch('/api/block/updateBlock', {
-              method: 'POST',
-              headers: {
-                  'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                  id: blockId,
-                  dataType: 'markdown', // Assuming markdown is the desired data type
-                  data: newMarkdown,
-              }),
-          });
-          if (!response.ok) {
-              const errorText = await response.text();
-              throw new Error(`API updateBlock failed (${response.status}): ${errorText}`);
-          }
-          const result = await response.json();
-          if (result.code !== 0) {
-              throw new Error(`API updateBlock returned error code ${result.code}: ${result.msg}`);
-          }
-          console.log(`Block ${blockId} updated successfully.`);
-          // Optionally add a success message to chat?
-          // addSystemMessage(`已成功更新块 ${blockId}`);
-      } catch (error) {
-          console.error(`Error executing updateBlock for ${blockId}:`, error);
-          errorMessage = `更新块 ${blockId} 失败: ${error.message}`;
           throw error; // Re-throw to be caught by sendMessage
       }
   }
@@ -484,6 +698,7 @@
 
     errorMessage = '';
     isLoading = true;
+    console.log("[sendMessage] Set isLoading to true."); // Log isLoading change
     
     // --- Frontend Command Handling for "[删除|修改]选区N" ---
     const selectionCommandMatch = currentUserInput.match(/^(删除|修改)选区(\d+)$/i);
@@ -617,7 +832,7 @@
         }));
 
     // Modify system prompt to include context if available
-    let systemPrompt = `You are a helpful AI assistant integrated into Siyuan Note.\\nYou can interact with the document content based on the provided context.\\n\\n**Understanding the Context:**\\nThe context below shows the structure and content of the current document or specific blocks selected by the user.\\nEach block is listed with its sequential number, unique ID, and type, like this:\\n--- Block N (ID: yyyy-mmdd-xxxxxx, Type: p) ---\\n[Markdown content of the block]\\n---\\n+(Referenced blocks, if any, will be listed under \\"Referenced content:\\")\\n\\n**Performing Actions (Delete/Update):**\\nWhen the user asks you to modify the document (e.g., \\"delete the second paragraph\\\", \\"update the list item with ID xxx\\\"):\\n1. Carefully identify the **exact block ID** (e.g., yyyy-mmdd-xxxxxx) from the context that corresponds to the user\\'s request.\\n2. Output **only** a single JSON command block using one of the following formats. **You MUST use the specific block ID found in the context.**\\n\\n   *   To delete a block: \\\`\\\`\\\`json {\\\"action\\\": \\\"delete\\\", \\\"block_id\\\": \\\"TARGET_BLOCK_ID_FROM_CONTEXT\\\"} \\\`\\\`\\\`\\\n   *   To update a block: \\\`\\\`\\\`json {\\\"action\\\": \\\"update\\\", \\\"block_id\\\": \\\"TARGET_BLOCK_ID_FROM_CONTEXT\\\", \\\"new_markdown\\\": \\\"NEW_MARKDOWN_CONTENT\\\"} \\\`\\\`\\\`\\\n   *   To insert a block: \\\`\\\`\\\`json {\\\"action\\\": \\\"insert\\\", \\\"previousID\\\": \\\"ID_OF_BLOCK_BEFORE\\\", \\\"parentID\\\": null, \\\"markdown\\\": \\\"NEW_MARKDOWN_CONTENT\\\"} \\\`\\\`\\\` (Note: parentID is usually null for insertions relative to existing blocks)\\\n\\n**IMPORTANT RULES:**\\n*   **Action Intent:** Determine the user\\\'s core goal:\\\n    *   \\'update\\': User wants to *modify, update, or replace* content of an *existing* block.\\\n    *   \\'delete\\': User wants to *remove or delete* an *existing* block.\\\n    *   \\'insert\\': User wants to *add, insert, create, or write* *new* content/blocks.\\\n    *   **If unsure about intent, ASK the user.**\\\n*   **Handling Multi-Block References (CRITICAL - READ CAREFULLY!):** When a reference label (e.g., "Selection 1") points to multiple block IDs in the \\\`Referenced content\\\`:\\n    *   **Information Requests:** If asked for information (e.g., "What is in Selection 1?", "Summarize Selection 1"), you **MUST** address or summarize the content of **ALL** associated blocks in your response.\\n    *   **Action Requests (e.g., "delete", "update", "insert after Selection 1"):** \\n        1.  You **MUST NOT** generate multiple commands for this single user request.\\n        2.  You **MUST NOT** guess which block to act upon.\\n        3.  You **MUST ALWAYS ask the user for clarification FIRST**. \\n        4.  **Your clarification response MUST be ONLY natural language**, asking which specific block ID they want the action performed on. Example: \\"Selection 1 includes Block ID xxx and Block ID yyy. Which one do you want to [action]?\\" **DO NOT include any JSON command block in your clarification response.**\\n        5.  **Only AFTER** the user responds specifying a single ID, you can then generate a **single** command targeting that user-specified ID.\\n*   **Insert Command - How to Set IDs (ONLY relative to specific Block IDs):**\\\n    *   **Goal: Insert AFTER Block A?** (e.g., \\"add below Block A\\\", \\"insert after selection 1\\\")\\\n        *   Find Block A\\\'s ID in the context (\\\'BLOCK_A_ID\\\').\\\n        *   Set \\\'previousID\\\' = \\\'BLOCK_A_ID\\\'.\\\n        *   Set \\\'parentID\\\' = null (or omit).\\\n    *   **Goal: Insert BEFORE Block B?** (e.g., \\"insert before Block B\\\", \\"add above selection 1\\\")\\\n        *   Find the ID of the block *immediately preceding* Block B in the context (\\\'BLOCK_B_minus_1_ID\\\'). **There MUST be a preceding block.**\\\n        *   Set \\\'previousID\\\' = \\\'BLOCK_B_minus_1_ID\\\'.\\\n        *   Set \\\'parentID\\\' = null (or omit).\\\n    *   **Goal: Insert BETWEEN Block A and Block B?** (e.g., \\"put this between block 1 and 2\\\")\\\n        *   Treat this as \\"Insert AFTER Block A\\\".\\\n        *   Find Block A\\\'s ID (\\\'BLOCK_A_ID\\\').\\\n        *   Set \\\'previousID\\\' = \\\'BLOCK_A_ID\\\'.\\\n        *   Set \\\'parentID\\\' = null (or omit).\\\n    *   **Content:** The \\\'markdown\\\' field must contain the complete Markdown content for the new block(s).\\\n*   **NO Fuzzy Locations:** Requests like \\\"insert at the beginning\\\", \\\"insert at the end\\\", or \\\"insert here\\\" are **NOT SUPPORTED** for direct action. See \\\"Ask If Unsure\\\".\\\n*   **Referenced Context First:** If \\\'Referenced content\\\' is provided and the user\\\'s request mentions the selection/reference (e.g., \\\"update selection 1\\\", \\\"insert after the selected paragraph\\\"), **MUST** use the block ID(s) from the \\\'Referenced content\\\' section for targeting.\\\n*   **Use Exact IDs:** Always use the exact block IDs shown in parentheses (ID: ...) from the context. Never guess IDs or use block numbers like \\\"Block 3\\\".\\\n*   **Ask If Unsure (CRITICAL):** If the user\\\'s request is ambiguous about the action (update/delete/insert), the target block/location, or if you cannot confidently find the necessary IDs in the context according to these rules (including the multi-block clarification rule), **you MUST ask the user for clarification**. \\\n    *   **Specifically:** If the user asks to insert at the beginning, end, or uses vague terms without specifying a block ID, you MUST reply asking them to provide the **ID of the block** they want to insert **before** or **after**.\\\n    *   Example clarifying question: \\\"To insert the content, please tell me the ID of the block you want to insert it before or after.\\\"\\\n    *   Do NOT guess or make assumptions.\\\n*   **Normal Chat:** For general questions, summaries, or explanations that don\\\'t involve changing the document, respond normally in natural language without any JSON command block.\\\n\\\n--- Context Starts Below:`;
+    let systemPrompt = `You are a helpful AI assistant integrated into Siyuan Note.\\n\\nYou can interact with the document content based on the provided context.\\n\\n**Understanding the Context:**\\nThe context below shows the structure and content of the current document or specific blocks selected by the user.\\n\\n**CRITICAL: The blocks are presented in their exact hierarchical order as they appear in the document. Indentation signifies nesting depth. You MUST rely SOLELY on this order and indentation to understand the document structure. DO NOT infer order from block IDs or timestamps.**\\n\\nEach block is clearly marked like this:\\n--- Block (ID: yyyy-mmdd-xxxxxx, Type: p) ---\\n[Markdown content of the block]\\n---\\n(Referenced blocks, if any, will be listed under \\\"Referenced content:\\\")\\n\\n**Performing Actions (Delete/Insert):**\\nWhen the user asks you to modify the document:\\n1. Carefully identify the **exact block ID(s)** from the context that corresponds to the user's request, using the provided order and structure.\\n2. Output **one or more** JSON command blocks using ONLY the following formats. **You MUST use the specific block ID(s) found in the context.**\\n\n   *   To delete a block: \\\`\\\`\\\`json\\n{\\\"action\\\": \\\"delete\\\", \\\"block_id\\\": \\\"TARGET_BLOCK_ID_FROM_CONTEXT\\\"}\\n\\\`\\\`\\\`\\n   *   To insert a new block: \\\`\\\`\\\`json\\n{\\\"action\\\": \\\"insert\\\", \\\"previousID\\\": \\\"ID_OF_BLOCK_TO_INSERT_AFTER\\\", \\\"parentID\\\": null, \\\"markdown\\\": \\\"NEW_MARKDOWN_CONTENT\\\"}\\n\\\`\\\`\\\` (Use the ID of the block you want to insert *after* as previousID. parentID is usually null.)\\n\\n**IMPORTANT RULES:**\\n*   **Multiple Commands:** You CAN output multiple \\\`delete\\\` and \\\`insert\\\` commands in a single response.\\n*   **Action Intent:** Determine the user's core goal: delete or insert new content.\\n*   **Handling Multi-Block References (e.g., \\\"Selection 1\\\"):**\\n    *   **Information Requests:** Summarize/address ALL associated blocks.\\n    *   **Action Requests (Delete):** Issue one \\\`delete\\\` command for **EACH** block ID in the reference.\\n    *   **Action Requests (Modify):** \\n        1. Issue one \\\`delete\\\` command for **EACH** block ID in the reference.\\n        2. Issue **ONE** \\\`insert\\\` command containing the **ENTIRE** modified content.\\n        3. The \\\`previousID\\\` for this insert command **MUST** be the ID of the block immediately **PRECEDING** the **FIRST** block of the selection (use context order). If the selection starts at the very beginning, \\\`previousID\\\` might be empty or require parent ID handling (ask if unsure about this specific edge case).\\n    *   **Action Requests (Insert AFTER selection):** \\n        1. Issue **ONE** \\\`insert\\\` command containing the **ENTIRE** new content.\\n        2. The \\\`previousID\\\` for this insert command **MUST** be the ID of the **LAST** block in the selection (use context order).\\n    *   **Action Requests (Insert BEFORE selection):** \\n        1. Issue **ONE** \\\`insert\\\` command containing the **ENTIRE** new content.\\n        2. The \\\`previousID\\\` for this insert command **MUST** be the ID of the block immediately **PRECEDING** the **FIRST** block of the selection (use context order).\\n*   **Single Block Modification:** Still performed as delete-then-insert. The \\\`previousID\\\` for the insert is the ID of the block preceding the deleted one.\\n*   **Insert Command - Target Location Rules (Single Block Relative):**\\n    *   **Goal: Insert AFTER Block A?** Set \\\'previousID\\\' = \\\'BLOCK_A_ID\\\'.\\n    *   **Goal: Insert BEFORE Block B?** Find Block B-1 preceding Block B using context order. Set \\\'previousID\\\' = \\\'BLOCK_B_minus_1_ID\\\'.\\n    *   **NO FUZZY LOCATIONS:** \\\"insert at beginning/end/here\\\" are NOT directly supported *unless* clearly referring to the start/end of a known multi-block selection (handled above) or the entire document. If ambiguous for single block, ask for relative ID.\\n*   **Referenced Context Priority:** If \\\'Referenced content\\\' exists and the user refers to it, use IDs from THAT section.\\n*   **Use Exact IDs:** Always use the exact \\\`ID: yyyy-mmdd-xxxxxx\\\` from the context.\\n*   **Ask If Unsure (Ambiguity):** If ambiguous about the **target block(s)** (e.g., \\\"that paragraph\\\") or the **exact insertion point relative to a single block** (e.g., \\\"insert near the start\\\"), or if required preceding IDs cannot be found, MUST ask user for clarification. **Do NOT ask just because a target is a known multi-block selection.**\\n*   **Normal Chat:** For non-modification requests, respond normally without JSON command blocks.\\n\\n--- Context Starts Below:`;
 
     if (combinedContextForApi) { // Check the combined context
         // Use the new structured context string
@@ -630,6 +845,9 @@
         ...historyForApi // History already includes the latest user message
     ];
 
+    // DEBUG: Log the exact system prompt being sent to the AI
+    console.log("DEBUG: Final System Prompt Content Sent to AI:\n", systemPrompt);
+
     console.log("Messages being sent to API (final format):", finalMessagesForApi);
 
     try {
@@ -637,63 +855,93 @@
         const assistantResponseContent = await fetchChatCompletion(finalMessagesForApi, currentSettings);
         
         // --- Check for Action Command --- 
-        let commandExecuted = false;
-        const commandMatch = assistantResponseContent.match(/```json\n({.*?})\n```/s);
+        let commandsExecuted = 0; // Count executed commands
+        let assistantResponseForDisplay = assistantResponseContent; // Store original response
         
-        if (commandMatch && commandMatch[1]) {
-            try {
-                const command = JSON.parse(commandMatch[1]);
-                console.log("Parsed AI command:", command);
-                if (command.action === 'delete' && command.block_id) {
-                    await executeDeleteBlock(command.block_id);
-                    commandExecuted = true;
-                    // Add confirmation message instead of assistant's raw JSON
-                    const confirmId = Date.now().toString() + 'cmd-del';
-                    messages.update(m => [...m, { id: confirmId, role: 'assistant', content: `已执行删除块 ${command.block_id} 的操作。`, html: markdownToHtml(`已执行删除块 **${command.block_id}** 的操作。`) }]);
-                    messages.set([...get(messages)]);
-                } else if (command.action === 'update' && command.block_id && typeof command.new_markdown === 'string') {
-                    await executeUpdateBlock(command.block_id, command.new_markdown);
-                    commandExecuted = true;
-                    // Add confirmation message
-                    const confirmId = Date.now().toString() + 'cmd-upd';
-                    messages.update(m => [...m, { id: confirmId, role: 'assistant', content: `已执行更新块 ${command.block_id} 的操作。`, html: markdownToHtml(`已执行更新块 **${command.block_id}** 的操作。`) }]);
-                    messages.set([...get(messages)]);
-                } else if (command.action === 'insert' && typeof command.markdown === 'string' && (
-                    (typeof command.previousID === 'string') || // previousID can be empty string or an ID
-                    (typeof command.parentID === 'string' && command.parentID !== '') // parentID must be a non-empty string if used
-                    )) {
-                        const previousId = command.previousID === "" ? null : command.previousID; // Handle empty string case
-                        const parentId = command.parentID || null; // Use null if undefined or empty
-                        await executeInsertBlock(previousId, command.markdown, parentId);
-                        commandExecuted = true;
-                        // Add confirmation message
-                        const confirmId = Date.now().toString() + 'cmd-ins';
-                        const locationDesc = previousId ? `块 ${previousId} 之后` : (parentId ? `文档 ${parentId} 开头` : '文档开头'); // Adjusted description for parentID
-                        messages.update(m => [...m, { id: confirmId, role: 'assistant', content: `已在 ${locationDesc} 插入新块。`, html: markdownToHtml(`已在 **${locationDesc}** 插入新块。`) }]);
-                        messages.set([...get(messages)]);
-                } else {
-                    console.warn("Parsed command JSON has invalid action or missing/invalid parameters:", command);
-                    // Fall through to display the raw response if command is invalid
+        // Use global match to find all command blocks
+        const commandRegex = /```json\n({.*?})\n```/gs; 
+        let match;
+        const commandsToExecute: any[] = [];
+
+        while ((match = commandRegex.exec(assistantResponseContent)) !== null) {
+            if (match[1]) {
+                try {
+                    const commandJson = match[1];
+                    const command = JSON.parse(commandJson);
+                    commandsToExecute.push(command); 
+                } catch (parseError) {
+                    console.error("Failed to parse command JSON:", parseError, "Raw content:", match[1]);
+                    // If parsing fails, keep the original response content for display
                 }
-            } catch (parseError) {
-                console.error("Failed to parse command JSON:", parseError, "Raw content:", commandMatch[1]);
-                // Fall through to display the raw response if parsing fails
             }
         }
         
-        // --- Display Normal Assistant Response (if no command executed) ---
-        if (!commandExecuted) {
-        const assistantId = Date.now().toString() + Math.random().toString(36).substring(2, 9);
-        // Create assistant message with unique ID
-        const assistantMessage: DisplayChatMessage = { 
-            id: assistantId, 
-            role: 'assistant', 
-            content: assistantResponseContent, 
-            html: markdownToHtml(assistantResponseContent)
-        }; 
-        messages.update(currentMessages => [...currentMessages, assistantMessage]);
-        messages.set([...get(messages)]); // Force reactivity update
-        console.log("Assistant message added to store:", get(messages)); // Log after update
+        console.log("Found commands to execute:", commandsToExecute); // Log all parsed commands
+
+        // --- Execute Parsed Commands --- 
+        if (commandsToExecute.length > 0) {
+            let confirmationMessages: { id: string, role: 'assistant', content: string, html: string }[] = [];
+            
+            for (const command of commandsToExecute) {
+                try {
+                    console.log("Executing command:", command);
+                    if (command.action === 'delete' && command.block_id) {
+                        await executeDeleteBlock(command.block_id);
+                        commandsExecuted++;
+                        const confirmId = Date.now().toString() + `cmd-del-${commandsExecuted}`;
+                        confirmationMessages.push({ id: confirmId, role: 'assistant', content: `已执行删除块 ${command.block_id} 的操作。`, html: markdownToHtml(`已执行删除块 **${command.block_id}** 的操作。`) });
+                    // REMOVED 'update' command handling
+                    } else if (command.action === 'insert' && typeof command.markdown === 'string' && (
+                        (typeof command.previousID === 'string') || 
+                        (typeof command.parentID === 'string' && command.parentID !== '') 
+                        )) {
+                            const previousId = command.previousID === "" ? null : command.previousID; 
+                            const parentId = command.parentID || null; 
+                            await executeInsertBlock(previousId, command.markdown, parentId);
+                            commandsExecuted++;
+                            const confirmId = Date.now().toString() + `cmd-ins-${commandsExecuted}`;
+                            const locationDesc = previousId ? `块 ${previousId} 之后` : (parentId ? `文档 ${parentId} 开头` : '文档开头');
+                            confirmationMessages.push({ id: confirmId, role: 'assistant', content: `已在 ${locationDesc} 插入新块。`, html: markdownToHtml(`已在 **${locationDesc}** 插入新块。`) });
+                    } else {
+                        console.warn("Parsed command JSON has invalid action (only delete/insert supported) or missing/invalid parameters:", command);
+                        // Add a message indicating the invalid command if needed, or just ignore
+                    }
+                } catch (execError) {
+                     console.error(`Error executing command: ${JSON.stringify(command)}`, execError);
+                     // Add an error message for this specific command failure
+                     const errorId = Date.now().toString() + `cmd-err-${commandsExecuted}`;
+                     confirmationMessages.push({ id: errorId, role: 'assistant', content: `执行命令 ${command.action} 失败: ${execError.message}`, html: markdownToHtml(`执行命令 **${command.action}** 失败: ${execError.message}`) });
+                }
+            } // End for loop
+
+            // If any commands were attempted, add confirmation/error messages
+            if (confirmationMessages.length > 0) {
+                messages.update(m => [...m, ...confirmationMessages]);
+                messages.set([...get(messages)]);
+            }
+        } // End if commandsToExecute.length > 0
+
+        
+        // --- Display Normal Assistant Response (if no commands were executed or if original response wasn't just commands) ---
+        // Display the original response ONLY IF no commands were successfully executed OR if the original response contained more than just the command blocks.
+        // A simple check: if the original response stripped of command blocks is still non-empty.
+        const contentWithoutCommands = assistantResponseContent.replace(commandRegex, '').trim();
+
+        if (commandsExecuted === 0 || contentWithoutCommands.length > 0) {
+             // If commands were executed BUT there's other text, display the non-command part
+            const displayContent = commandsExecuted > 0 ? contentWithoutCommands : assistantResponseForDisplay;
+            if (displayContent.length > 0) { // Only display if there's actual content left
+                const assistantId = Date.now().toString() + Math.random().toString(36).substring(2, 9);
+                const assistantMessage: DisplayChatMessage = { 
+                    id: assistantId, 
+                    role: 'assistant', 
+                    content: displayContent, 
+                    html: markdownToHtml(displayContent)
+                }; 
+                messages.update(currentMessages => [...currentMessages, assistantMessage]);
+                messages.set([...get(messages)]); // Force reactivity update
+                console.log("Assistant message (non-command part or original) added to store:", get(messages));
+            }
         }
 
         // saveMessagesToStorage(); // Assuming this uses role/content
@@ -714,6 +962,7 @@
         console.log("Error message added to store:", get(messages)); // Log after update
     } finally {
         isLoading = false;
++       console.log("[sendMessage] Set isLoading to false in finally block."); // Log isLoading change
         // Clear selection references AFTER the API call attempt ONLY IF NOT handled by frontend
         if (!commandHandledByFrontend && selectionReferences.length > 0) { 
             console.log("Clearing selection references after AI call.");
@@ -937,6 +1186,175 @@
     showHistory = !showHistory;
   }
 
+  // --- Context Menu Handlers ---
+  // Revert back to using contextmenu event
+  function handleContextMenu(event: MouseEvent) { 
+    // Only proceed for right-click (contextmenu event implies right-click, but check anyway? button is often 0 for contextmenu)
+    // if (event.button !== 2) { 
+    //     return;
+    // }
+    
+    console.log('[ContextMenu] handleContextMenu triggered.'); // Revert log prefix
+    const targetElement = event.target as HTMLElement;
+    const messageElement = targetElement.closest('.message') as HTMLElement;
+    console.log('[ContextMenu] Closest message element:', messageElement); // Revert log prefix
+
+    if (messageElement) {
+        // ---> Put preventDefault back here, immediately <--- 
+        event.preventDefault(); 
+        // ---> ADD stopPropagation to prevent interference <--- 
+        event.stopPropagation();
+        
+        const messageId = messageElement.dataset.messageId;
+        console.log('[ContextMenu] Attempting to get message ID:', messageId); // Revert log prefix
+
+        if (!messageId) {
+            console.warn("[ContextMenu] Could not find data-message-id attribute."); // Revert log prefix
+            hideContextMenu();
+            return;
+        }
+
+        contextTargetMessageId = messageId;
+        contextMenuLeft = event.clientX;
+        contextMenuTop = event.clientY;
+        console.log(`[ContextMenu] Setting state: show=true, targetId=${contextTargetMessageId}, pos=(${contextMenuLeft}, ${contextMenuTop})`); // Revert log prefix
+        showContextMenu = true;
+        console.log(`[ContextMenu] State set. showContextMenu is now: ${showContextMenu}`); // Revert log prefix
+
+        // Add a one-time click listener to the window to hide the menu
+        // Use setTimeout to prevent the current click from immediately closing the menu
+        setTimeout(() => {
+            // No preventDefault here anymore
+
+            // ---> Add BOTH hide listeners back <--- 
+            window.addEventListener('click', handleClickOutside, { once: true }); 
+            window.addEventListener('contextmenu', handleClickOutside, { once: true }); 
+            console.log('[ContextMenu] Added BOTH hide listeners inside setTimeout'); // Revert log prefix
+        }, 0); 
+
+    } else {
+        console.log('[ContextMenu] Right-click was not inside a .message element.'); // Revert log prefix
+        hideContextMenu(); // Hide if clicking outside a message
+    }
+  }
+
+  function hideContextMenu() {
+    showContextMenu = false;
+    contextTargetMessageId = null;
+    // Ensure removal of listeners if menu hidden programmatically
+    // Need to remove the specific listeners added in setTimeout
+    // Removing them generally might be okay, but let's be precise if needed later.
+    // It might be safer to just let `once: true` handle the removal.
+    // window.removeEventListener('click', handleClickOutside);
+    // window.removeEventListener('contextmenu', handleClickOutside);
+    console.log('[ContextMenu] hideContextMenu called'); // Add log here
+  }
+
+  // Handles clicks outside the context menu to hide it
+  function handleClickOutside(event: MouseEvent) {
+      // Check if the click was outside the context menu itself (implementation detail)
+      // A simpler approach for now: any click outside the original target area hides it.
+      hideContextMenu();
+      // Important: Stop propagation if needed to prevent other actions
+      // event.stopPropagation(); 
+  }
+
+  async function copyMessage() {
+      console.log(`[ContextMenu] copyMessage called. contextTargetMessageId: ${contextTargetMessageId}`); 
+      if (!contextTargetMessageId) return;
+      const messageToCopy = get(messages).find(m => m.id === contextTargetMessageId);
+      console.log("[Copy] Found message object:", messageToCopy); // 检查找到的对象
+      if (messageToCopy && typeof messageToCopy.content === 'string') { // Ensure content is a string
+          try {
+              const contentToCopy = messageToCopy.content; // Store content in a variable for logging
+              console.log("[Copy] Attempting to write to clipboard:", contentToCopy); 
+              await navigator.clipboard.writeText(contentToCopy);
+              console.log("[Copy] Successfully wrote to clipboard."); 
+              // Optional: Show temporary success feedback?
+          } catch (err) {
+              console.error("[Copy] Failed to copy message content:", err); 
+              errorMessage = "复制失败: " + err.message; // Show error to user
+          }
+      } else {
+          console.warn("[Copy] Message not found or content is not a string.", contextTargetMessageId); 
+          errorMessage = "无法复制：未找到消息或消息无有效内容。";
+      }
+      hideContextMenu();
+      // ---> ADD Explicit listener removal <---
+      window.removeEventListener('click', handleClickOutside);
+      window.removeEventListener('contextmenu', handleClickOutside);
+  }
+
+  function deleteMessageHandler() {
+      console.log(`[ContextMenu] deleteMessageHandler called. contextTargetMessageId: ${contextTargetMessageId}`);
+      if (!contextTargetMessageId) return;
+      const targetId = contextTargetMessageId; // Store before hiding menu potentially clears it
+      console.log(`[Delete] Target ID for deletion: ${targetId}`); 
+      
+      const currentMessages = get(messages);
+      console.log('[Delete] Message IDs BEFORE filtering:', currentMessages.map(m => m.id)); 
+      const updatedMessages = currentMessages.filter(m => m.id !== targetId);
+      console.log('[Delete] Message IDs AFTER filtering (before set):', updatedMessages.map(m => m.id)); 
+
+
+      if (currentMessages.length === updatedMessages.length) {
+          console.warn(`[Delete] Message with ID ${targetId} not found in current messages array. Filter had no effect.`); 
+      } else {
+          console.log(`[Delete] Filter successful. Calling messages.set()...`); 
+          messages.set(updatedMessages); // <<-- 确认这一行存在且被执行
+          console.log('[Delete] messages.set() called. Current IDs in store:', get(messages).map(m=>m.id)); // 验证 store 状态
+      }
+      
+      hideContextMenu(); // Hide menu after operation
+      // ---> ADD Explicit listener removal <---
+      window.removeEventListener('click', handleClickOutside);
+      window.removeEventListener('contextmenu', handleClickOutside);
+      // Note: This only deletes from the current view. 
+      // It doesn't affect the saved conversation history unless save logic is updated.
+  }
+
+  // --- NEW: Function to save active (unsaved) conversation state --- 
+  async function saveActiveConversationState() {
+      // This function is primarily called by the debounced reactive block
+      // It assumes the conditions (unsaved, messages > 1) are already met by the caller
+      try {
+          const currentMsgs = get(messages);
+          console.log(`[saveActiveState] Attempting to save ${currentMsgs.length} messages to ${ACTIVE_CONVERSATION_KEY}. Data:`, JSON.stringify(currentMsgs)); // Log data
+          await pluginData.saveData(ACTIVE_CONVERSATION_KEY, currentMsgs);
+          console.log(`[saveActiveState] Save attempt finished for ${ACTIVE_CONVERSATION_KEY}`); // Log completion
+      } catch (error) {
+          console.error('[saveActiveState] Error saving active conversation state:', error);
+      }
+  }
+
+  // --- NEW: Function to clear persisted active conversation state --- 
+  async function clearActiveConversationState() {
+      try {
+          console.log(`[clearActiveState] Clearing persisted state in ${ACTIVE_CONVERSATION_KEY}`);
+          await pluginData.saveData(ACTIVE_CONVERSATION_KEY, null); // Save null or empty array to clear
+      } catch (error) {
+          console.error('[clearActiveState] Error clearing active conversation state:', error);
+      }
+  }
+
+  // --- Reactive block to auto-save active state --- 
+  $: {
+      const currentMsgs = $messages; // Access store value reactively
+      // Debounce the saving logic
+      if (debounceSaveActiveTimeout) {
+          clearTimeout(debounceSaveActiveTimeout);
+      }
+      debounceSaveActiveTimeout = window.setTimeout(() => {
+          // Check conditions *inside* the debounced function
+          if (currentConversationId === null && currentMsgs.length > 1) {
+              console.log('[Debounced Save] Conditions met, calling saveActiveConversationState...');
+              saveActiveConversationState();
+          } else {
+              // console.log('[Debounced Save] Conditions not met (saved or < 2 messages). Skipping save.');
+          }
+      }, SAVE_ACTIVE_DEBOUNCE_MS);
+  }
+
 </script>
 
 <div class="ai-chat-panel">
@@ -980,14 +1398,14 @@
        {/if}
   </div>
 
-  <div class="chat-history" bind:this={chatHistoryElement}> 
+  <div class="chat-history" bind:this={chatHistoryElement} on:contextmenu={handleContextMenu}> 
     {#each $messages as message (message.id)} 
         {#if message.role === 'user'}
-            <div class="message user">
+            <div class="message user" data-message-id={message.id}>
                 <div>{@html message.content.replace(/\n/g, '<br/>')}</div> 
             </div>
         {:else if message.role === 'assistant'}
-            <div class="message ai">
+            <div class="message ai" data-message-id={message.id}>
                 {@html message.html || message.content} 
             </div>
         {/if} 
@@ -1022,6 +1440,16 @@
       引用选区
     </button>
   </div>
+
+  <!-- Custom Context Menu -->
+  {#if showContextMenu}
+    <div class="context-menu" style="top: {contextMenuTop}px; left: {contextMenuLeft}px;">
+      <ul>
+        <li on:click={copyMessage}>复制</li>
+        <li on:click={deleteMessageHandler}>删除</li>
+      </ul>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -1033,18 +1461,22 @@
     font-family: sans-serif;
     padding: 5px; /* 稍微减少内边距 */
     box-sizing: border-box; /* 防止 padding 导致溢出 */
+    background-color: var(--b3-theme-background); /* Use theme background */
+    color: var(--b3-theme-on-background); /* Use theme text color */
   }
 
   .chat-history {
     flex-grow: 1; /* 占据剩余空间 */
     overflow-y: auto; /* 内容多时可滚动 */
-    border: 1px solid #eee;
+    border: 1px solid color-mix(in srgb, var(--b3-theme-on-surface) 10%, transparent); /* Fainter border */
     margin-bottom: 5px;
     padding: 8px;
     display: flex; /* 添加 flex 布局 */
     flex-direction: column; /* 消息垂直排列 */
+    background-color: var(--b3-theme-surface); /* Use theme surface color for subtle difference */
   }
 
+  /* --- Restore Previous Styles --- */
   /* 消息气泡基础样式 */
   .message {
       max-width: 80%;
@@ -1057,27 +1489,36 @@
 
   /* 用户消息样式 */
   .message.user {
-      background-color: var(--b3-theme-primary-light); /* 思源主题浅色 */
-      color: var(--b3-theme-primary-darker); /* 思源主题深色 */
+      background-color: var(--b3-theme-primary); /* Use primary theme color */
+      color: var(--b3-theme-on-primary); /* Use text color suitable for primary bg */
       align-self: flex-end; /* 用户消息靠右 */
       border-bottom-right-radius: 5px;
   }
 
   /* AI 消息样式 */
   .message.ai {
-      background-color: #f0f0f0; /* 浅灰色背景 */
-      color: #333;
+      background-color: var(--b3-theme-surface-lighter); /* Match reference bar bg? Use lighter surface */
+      color: var(--b3-theme-on-surface); /* Use text color suitable for surface */
       align-self: flex-start; /* AI 消息靠左 */
       border-bottom-left-radius: 5px;
   }
+  /* --- End Restore Previous Styles --- */
 
   .message p {
       margin: 0;
   }
 
+  .message.ai :global(p) {
+      /* 移除默认 margin，避免与气泡内边距冲突，并解决初始消息空行问题 */
+      margin: 0; 
+  }
+
   .input-area {
     display: flex;
     align-items: center; /* 垂直居中对齐输入框和按钮 */
+    border-top: 1px solid var(--b3-theme-surface-lighter); /* Add border for separation */
+    padding-top: 5px; /* Add some padding above input */
+    background-color: var(--b3-theme-background); /* Match panel background */
   }
 
   textarea {
@@ -1085,21 +1526,24 @@
     resize: none; /* 禁止调整大小 */
     margin-right: 5px;
     padding: 5px;
-    border: 1px solid #ccc;
+    border: 1px solid color-mix(in srgb, var(--b3-theme-on-surface) 10%, transparent); /* Fainter border */
     border-radius: 3px;
+    background-color: var(--b3-theme-surface);
+    color: var(--b3-theme-on-surface);
   }
 
   button {
     padding: 5px 10px;
     cursor: pointer;
     background-color: var(--b3-theme-primary); /* 使用思源主题色 */
-    color: white;
+    color: var(--b3-theme-on-primary); /* Use theme variable for text on primary */
     border: none;
     border-radius: 3px;
   }
   
   button:disabled {
-      background-color: #ccc;
+      background-color: var(--b3-theme-disabled); /* Use theme disabled color */
+      color: var(--b3-theme-on-disabled); /* Use theme disabled text color */
       cursor: not-allowed;
   }
 
@@ -1133,7 +1577,6 @@
       display: flex;
       gap: 5px;
       padding: 5px 0;
-      border-bottom: 1px solid #eee;
       margin-bottom: 5px;
       flex-wrap: wrap; /* 换行 */
   }
@@ -1164,7 +1607,7 @@
       margin-bottom: 0.5em;
   }
   .message.ai :global(pre) {
-      background-color: #f5f5f5; 
+      background-color: var(--b3-theme-surface-lighter); 
       padding: 10px;
       border-radius: 4px;
       overflow-x: auto;
@@ -1172,20 +1615,22 @@
   }
   .message.ai :global(code) {
       font-family: monospace;
-      background-color: #f0f0f0;
+      background-color: var(--b3-theme-surface-lighter);
       padding: 0.2em 0.4em;
       border-radius: 3px;
+      color: var(--b3-theme-on-surface); /* Ensure code text color adapts */
   }
   .message.ai :global(pre) > :global(code) {
-      background-color: transparent;
+      background-color: transparent; /* Keep transparent inside pre */
       padding: 0;
       border-radius: 0;
+      color: inherit; /* Inherit color inside pre */
   }
   .message.ai :global(blockquote) {
-      border-left: 3px solid #ccc;
+      border-left: 3px solid var(--b3-theme-surface-lighter);
       padding-left: 10px;
       margin-left: 0;
-      color: #555;
+      color: var(--b3-theme-on-surface-lighter);
   }
   .message.ai :global(table) {
       border-collapse: collapse;
@@ -1194,16 +1639,18 @@
   }
   .message.ai :global(th),
   .message.ai :global(td) {
-      border: 1px solid #ddd;
+      border: 1px solid var(--b3-theme-surface-lighter);
       padding: 6px 10px;
   }
   .message.ai :global(th) {
-      background-color: #f2f2f2;
+      background-color: var(--b3-theme-surface-lighter);
+      color: var(--b3-theme-on-surface); /* Ensure header text color adapts */
   }
 
   .add-reference-button {
     margin-left: 5px;
     background-color: var(--b3-theme-secondary); /* Different color */
+    color: var(--b3-theme-on-secondary, var(--b3-theme-on-primary)); /* Add text color, fallback to on-primary */
   }
 
   .chat-container {
@@ -1246,6 +1693,7 @@
     overflow-y: auto;
     z-index: 10;
     box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    color: var(--b3-theme-on-surface); /* Ensure text color adapts */
   }
 
   .history-item {
@@ -1286,7 +1734,59 @@
 
   .history-item-empty {
     padding: 5px;
-    color: var(--b3-theme-on-surface-lighter);
+    color: var(--b3-theme-on-disabled); /* Use disabled color for empty message */
     font-style: italic;
   }
+
+  /* --- Custom Context Menu Styles --- */
+  .context-menu {
+    position: fixed; /* Use fixed to position relative to viewport */
+    background-color: var(--b3-theme-surface);
+    border: 1px solid var(--b3-theme-surface-lighter);
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    z-index: 1000; /* Ensure it's on top */
+    min-width: 100px;
+    padding: 5px 0; /* Padding top/bottom for the list */
+    color: var(--b3-theme-on-surface); /* Ensure text color adapts */
+  }
+
+  .context-menu ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .context-menu li {
+    padding: 8px 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .context-menu li:hover {
+    background-color: var(--b3-theme-primary-light); /* Adjust hover color if needed */
+    color: var(--b3-theme-primary-darker); /* Adjust text color on hover if needed */
+  }
+
+  /* Target the last element inside AI messages to remove bottom margin */
+  .message.ai > :global(*:last-child) {
+    margin-bottom: 0 !important; 
+  }
+
+  /* --- Force Text Selection --- */
+  /* Attempt to override potential user-select: none from parent or Siyuan */
+  .message.user div,
+  .message.ai :global(p),
+  .message.ai :global(code),
+  .message.ai :global(li),
+  .message.ai :global(pre),
+  .message.ai :global(blockquote),
+  .message.ai :global(td),
+  .message.ai :global(th) {
+      user-select: text !important; 
+      -webkit-user-select: text !important;
+      -moz-user-select: text !important;
+      -ms-user-select: text !important;
+  }
+
 </style> 
